@@ -1,0 +1,22 @@
+# Nightly backups. Enable it with
+#
+#   systemctl enable --now esgbot-backup.timer
+#
+# and check it with "systemctl list-timers esgbot-backup".
+
+[Unit]
+Description=Nightly backup of the ESG Flip bot's database
+Documentation=file:/opt/esgbot/README.md
+
+[Timer]
+# Just after half past three in the morning, server time, with a few minutes of
+# jitter so a host running several of these does not start them all at once.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+# A backup missed because the machine was off is taken at the next boot instead
+# of being skipped.
+Persistent=true
+Unit=esgbot-backup.service
+
+[Install]
+WantedBy=timers.target

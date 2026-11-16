@@ -1,0 +1,276 @@
+"""One flip per group, and the token every button press arrives with.
+
+The registry is the engine's front door. It holds the flips that are open, keyed
+both by group -- so a second ``/flip`` can be refused while one is running -- and
+by token, so a press can be matched to its flip. A token the registry does not
+know is a press on a lobby or table from before a restart, or on one that has
+already finished, and the Telegram layer answers it with an "expired" notice.
+
+A flip takes its place in the registry before its lobby message is posted, so two
+``/flip`` commands racing in the same group cannot both get through; if opening
+then fails, the place is given back. Flips take themselves out when they finish,
+are cancelled or are voided. :meth:`FlipRegistry.migrate_group` moves one from
+the id a group had to the id Telegram has just given it, so a flip in a group
+that becomes a supergroup keeps playing in the same chat under its new number.
+
+This is all in memory. Nothing here survives a restart, which is the point: the
+flips that were open are the rows the next start finds and voids. The one thing
+the registry does reach storage for is that migration, which takes the moved
+flip's own row along so the rows a restart reads name the chat the flip is
+really in.
+
+:meth:`FlipRegistry.shut_down` is how the bot stops, and it is not simply
+:meth:`FlipRegistry.close`: a flip whose result was being recorded as polling
+ended is finished rather than open, and recording it took its row away, so there
+is nothing for the next start to find and that flip's result has to go out now
+or never. Stopping therefore waits for those writes and those last messages,
+briefly, and before the Telegram session closes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import TracebackType
+from typing import Self
+
+from esgbot.engine import timing
+from esgbot.engine.clock import Clock, SystemClock
+from esgbot.engine.flip import Flip, Settler, settle_in_thread
+from esgbot.engine.gateway import Gateway
+from esgbot.engine.store import FlipStore
+from esgbot.engine.views import Player
+from esgbot.game.rules import Settings
+from esgbot.logging_setup import get_logger
+
+__all__ = ["FlipAlreadyOpenError", "FlipRegistry"]
+
+_logger = get_logger(__name__)
+
+
+class FlipAlreadyOpenError(Exception):
+    """This group already has a flip open, and only one runs at a time.
+
+    ``flip`` is the one that is open, so the refusal can point at its message.
+    """
+
+    def __init__(self, flip: Flip) -> None:
+        super().__init__(f"group {flip.group_id} already has flip {flip.token} open")
+        self.flip = flip
+
+    @property
+    def group_id(self) -> int:
+        """The group that already has a flip open."""
+        return self.flip.group_id
+
+
+class FlipRegistry:
+    """The flips that are open, by group and by token."""
+
+    __slots__ = ("_by_group", "_by_token", "_clock", "_gateway", "_settle", "_store")
+
+    def __init__(
+        self,
+        *,
+        gateway: Gateway,
+        store: FlipStore,
+        clock: Clock | None = None,
+        settle: Settler = settle_in_thread,
+    ) -> None:
+        """Hold the parts every flip in this process shares.
+
+        ``clock`` defaults to the real one and ``settle`` to the worker-thread
+        showdown; tests replace both.
+        """
+        self._gateway = gateway
+        self._store = store
+        self._clock: Clock = SystemClock() if clock is None else clock
+        self._settle = settle
+        self._by_group: dict[int, Flip] = {}
+        self._by_token: dict[str, Flip] = {}
+
+    def __len__(self) -> int:
+        return len(self._by_token)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    @property
+    def clock(self) -> Clock:
+        """The clock every flip here runs on."""
+        return self._clock
+
+    @property
+    def flips(self) -> tuple[Flip, ...]:
+        """Every flip that is open, in no particular order."""
+        return tuple(self._by_token.values())
+
+    def flip_for_group(self, group_id: int) -> Flip | None:
+        """The flip open in this group, or ``None``."""
+        return self._by_group.get(group_id)
+
+    def flip_for_token(self, token: str) -> Flip | None:
+        """The flip a button press belongs to, or ``None`` if this process never knew it."""
+        return self._by_token.get(token)
+
+    async def create_flip(
+        self,
+        *,
+        group_id: int,
+        starter: Player,
+        settings: Settings,
+        topic_id: int | None = None,
+        token: str | None = None,
+    ) -> Flip:
+        """Open a lobby: post its message, write its row, and start its timer.
+
+        The starter joins as the first player.
+
+        Raises:
+            FlipAlreadyOpenError: if this group already has one open.
+            PermanentFailureError: if the lobby message cannot be posted.
+            StorageError, sqlite3.Error: if the flip's row cannot be written.
+                Either way no flip is left behind and the group can try again.
+        """
+        open_already = self._by_group.get(group_id)
+        if open_already is not None:
+            raise FlipAlreadyOpenError(open_already)
+        flip = Flip(
+            group_id=group_id,
+            topic_id=topic_id,
+            settings=settings,
+            starter=starter,
+            gateway=self._gateway,
+            store=self._store,
+            clock=self._clock,
+            token=token,
+            settle=self._settle,
+            on_close=self._forget,
+        )
+        # Claimed before the first await, so two /flip commands cannot race in.
+        self._by_group[group_id] = flip
+        self._by_token[flip.token] = flip
+        try:
+            await flip._open()
+        except BaseException:
+            self._forget(flip)
+            raise
+        return flip
+
+    async def migrate_group(self, *, old_group_id: int, new_group_id: int) -> Flip | None:
+        """Follow a group Telegram has given a new id, taking its open flip along.
+
+        A group that becomes a supergroup keeps its flip but not its id, and the
+        old one stops working, so the flip's place here and everything it has
+        left to say move to the new one. Nothing else about the flip changes: the
+        same token, players, timer and topic, so the round carries on where it
+        was, and a ``/flip`` in the new group is refused while it runs.
+
+        The flip's active-flip row follows it too, which is the only thing here
+        that waits on the store and the only reason this is a coroutine: see
+        :meth:`Flip._follow_group`. Everything in memory has moved before that
+        write, and a write that fails is logged rather than raised. The group's
+        finished flips move separately, with the rest of its history.
+
+        The old id is left free. Telegram sends nothing there once a group has
+        moved, so nothing can arrive to use it.
+
+        Returns:
+            The flip that moved, or ``None`` when there was nothing to move: the
+            two ids are the same, the group had no flip open, or its flip is
+            over and already forgotten. One that has closed but is still here
+            moves too, so the last thing it has to say lands in the group that
+            still exists.
+
+        Raises:
+            FlipAlreadyOpenError: if the new id already has a flip of its own,
+                which would leave one group with two. Telegram only migrates a
+                group to an id nothing has used, so this does not arise; the
+                flip already in the new group keeps its place, and the one that
+                could not move is left alone.
+        """
+        if old_group_id == new_group_id:
+            return None
+        flip = self._by_group.get(old_group_id)
+        if flip is None:
+            return None
+        open_already = self._by_group.get(new_group_id)
+        if open_already is not None:
+            raise FlipAlreadyOpenError(open_already)
+        del self._by_group[old_group_id]
+        self._by_group[new_group_id] = flip
+        await flip._follow_group(new_group_id)
+        _logger.info(
+            "flip %s moved with its group from %d to %d", flip.token, old_group_id, new_group_id
+        )
+        return flip
+
+    def close(self) -> None:
+        """Drop every open flip's timers and forget them, abruptly.
+
+        Their rows stay, so the next start voids them and tells each group. What
+        this does not do is wait for anything: a flip part way through recording
+        its result is left to finish that write on its own, and whatever it had
+        to say goes unsaid. :meth:`shut_down` is the version the bot uses.
+        """
+        for flip in self.flips:
+            flip.stop()
+        count = len(self._by_token)
+        self._by_group.clear()
+        self._by_token.clear()
+        if count:
+            _logger.info("left %d open flip(s) for the next start to void", count)
+
+    async def shut_down(self, *, within: float = timing.SHUTDOWN_TELLING_SECONDS) -> None:
+        """Stop every flip, let it say how it ended, and forget them all.
+
+        This is what the bot does when polling stops, and it runs before the
+        Telegram session is closed, because the one thing a stopping flip may
+        still owe its group is a message. A flip that was recording its result
+        when the bot was asked to stop has a write that cannot be called back:
+        waiting for it is the only way to know the flip finished, and once it
+        has, nothing else will ever be in a position to say so -- it has no row
+        left for the next start to find.
+
+        Bounded by ``within``, in real seconds rather than on the flip's clock,
+        because what is being waited for is a database write in a worker thread
+        and a send on the wire. A stop that cannot finish is worse than a result
+        that arrives nowhere, so a flip still trying when the time is up is left
+        to its own deadline and the loss is logged. The flip is recorded either
+        way, and ``/verify`` can still answer for it.
+        """
+        flips = self.flips
+        for flip in flips:
+            flip.stop()
+        if flips:
+            telling = [
+                asyncio.create_task(flip.tell_outcome(), name=f"shutdown-{flip.token}")
+                for flip in flips
+            ]
+            _, late = await asyncio.wait(telling, timeout=within)
+            for task in late:
+                task.cancel()
+            if late:
+                _logger.error(
+                    "%d flip(s) could not say how they ended within %.0f seconds of stopping",
+                    len(late),
+                    within,
+                )
+        self._by_group.clear()
+        self._by_token.clear()
+        if flips:
+            _logger.info("stopped %d open flip(s)", len(flips))
+
+    def _forget(self, flip: Flip) -> None:
+        """Take a flip out, once it is over or if it never opened."""
+        if self._by_group.get(flip.group_id) is flip:
+            del self._by_group[flip.group_id]
+        if self._by_token.get(flip.token) is flip:
+            del self._by_token[flip.token]

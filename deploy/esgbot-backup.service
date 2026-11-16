@@ -1,0 +1,77 @@
+# One online backup of the bot's database, started by esgbot-backup.timer.
+#
+# It runs while the bot is running and does not disturb it: SQLite's backup API
+# takes a consistent copy of a WAL database under a read transaction. The copy is
+# integrity-checked before it is given its final name, and copies older than
+# ESGBOT_BACKUP_KEEP_DAYS are then deleted.
+#
+# The bot's token is deliberately not passed in. A backup needs the database path
+# and nothing else, so this unit does not read /etc/esgbot/esgbot.env.
+#
+#   systemctl start esgbot-backup.service     take one now
+#   journalctl -u esgbot-backup.service       what the last runs did
+#   systemctl list-timers esgbot-backup       when the next one is
+
+[Unit]
+Description=Back up the ESG Flip bot's database
+Documentation=file:/opt/esgbot/README.md
+
+[Service]
+Type=oneshot
+User=esgbot
+Group=esgbot
+WorkingDirectory=/opt/esgbot
+
+# Keep this in step with ESGBOT_DB_PATH in /etc/esgbot/esgbot.env. The backup
+# reads the file the bot writes, so the two must name the same one.
+Environment=ESGBOT_DB_PATH=/var/lib/esgbot/esgbot.sqlite3
+Environment=ESGBOT_BACKUP_DIR=/var/backups/esgbot
+Environment=ESGBOT_BACKUP_KEEP_DAYS=14
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/esgbot/deploy/backup.sh
+
+# The database's directory, which a reader of a WAL database also writes to: the
+# -shm and -wal files are how readers and the writer find each other.
+StateDirectory=esgbot
+StateDirectoryMode=0700
+# Created by the install steps; systemd will not create it for us, because
+# ProtectSystem=strict leaves /var/backups read-only. The leading "-" is what
+# makes a missing directory fail as "cannot write backups to ...: Read-only file
+# system" in the journal, rather than as systemd's own 226/NAMESPACE, which says
+# nothing about which path it means.
+ReadWritePaths=-/var/backups/esgbot
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=esgbot-backup
+
+# The same sandbox as the bot, minus any need for the network.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
