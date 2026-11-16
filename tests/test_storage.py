@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from esgbot.game import fairness
-from esgbot.game.rules import Y_DEFAULT, FlipRequest, Settings
+from esgbot.game.rules import MIN_PLAYERS, Y_DEFAULT, FlipRequest, Settings
 from esgbot.storage import (
     DEFAULT_LEADERBOARD_LIMIT,
     SCHEMA_VERSION,
@@ -1534,6 +1534,18 @@ def test_last_requests_are_kept_per_group(tmp_path: Path) -> None:
         "UPDATE group_last_flip SET z_defaulted = 1.5",
         "UPDATE group_last_flip SET wager = 'lots'",
         "UPDATE group_last_flip SET x = 0",
+        # A flag the figure beside it makes impossible: the bot fills Y in with
+        # 21 and Z with a player count this X can seat, never with these.
+        "UPDATE group_last_flip SET y_defaulted = 1",
+        "UPDATE group_last_flip SET z_defaulted = 1, z = 100",
+        "UPDATE group_last_flip SET z_defaulted = 1, z = 1",
+        # A figure that is not whole, and one on the wrong side of zero.
+        "UPDATE group_last_flip SET wager = 50.9",
+        "UPDATE group_last_flip SET wager = -50",
+        # The row cannot say when it was written, which is what decides its fate
+        # if the group is given a new id.
+        "UPDATE group_last_flip SET updated_at = 'nonsense'",
+        "UPDATE group_last_flip SET updated_at = '2026-01-01T12:00:00'",
     ],
 )
 def test_a_damaged_last_flip_row_raises_corrupt_record_error(
@@ -1708,6 +1720,124 @@ def test_migrate_group_id_keeps_the_newer_of_two_last_flip_rows(
             assert await db.last_flip_request(GROUP_A) is None
             expected = FlipRequest(50, 5, 2, 3) if kept_old else FlipRequest(10, 6, 1, 8)
             assert await db.last_flip_request(new_id) == expected
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 1
+
+
+@pytest.mark.parametrize("players", [MIN_PLAYERS, 8], ids=["fewest", "most-at-x-5"])
+def test_a_defaulted_z_any_table_could_have_had_reads_back_as_defaulted(
+    tmp_path: Path, players: int
+) -> None:
+    """The guard on a defaulted Z is the range, not one figure.
+
+    The row holds the player count that table came to, which is anything from
+    two up to what this X can seat, so every one of those has to read back as a
+    ``Z`` the command left out.
+    """
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+        tamper(path, "UPDATE group_last_flip SET z_defaulted = 1, z = ?", (players,))
+        async with await Database.open(path) as db:
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(50, 5, 2, None)
+
+    asyncio.run(scenario())
+
+
+def test_migrate_group_id_will_not_choose_between_last_flip_rows_on_a_damaged_time(
+    tmp_path: Path,
+) -> None:
+    """A clash the times cannot settle is refused rather than settled anyway.
+
+    Choosing would leave a group repeating settings that may not be its own. The
+    move is one transaction, so refusing costs the group the whole move -- which
+    is why only a row the decision rests on is read at all.
+    """
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+            await db.record_flip(
+                request_flip(GROUP_B, SETTINGS_TWO, seed_byte=2, started_at=EPOCH + timedelta(1))
+            )
+        tamper(
+            path,
+            "UPDATE group_last_flip SET updated_at = 'nonsense' WHERE group_id = ?",
+            (GROUP_A,),
+        )
+        async with await Database.open(path) as db:
+            with pytest.raises(CorruptRecordError) as caught:
+                await db.migrate_group_id(old_group_id=GROUP_A, new_group_id=GROUP_B)
+
+            assert caught.value.record == f"the last flip settings of group {GROUP_A}"
+            # Nothing is half done: the destination keeps its own row, and the
+            # old id keeps the history that was to move with it.
+            assert await db.last_flip_request(GROUP_B) == FlipRequest(10, 6, 1, 8)
+            assert await db.fetch_flip(group_id=GROUP_A, flip_number=1) is not None
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 2
+
+
+def test_migrate_group_id_moves_a_lone_last_flip_row_whose_time_is_damaged(
+    tmp_path: Path,
+) -> None:
+    """With nothing to choose between, the row moves and is caught when it is read.
+
+    Refusing here would cost a group its whole history over one unreadable
+    settings row, which is the worse of the two.
+    """
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+        tamper(path, "UPDATE group_last_flip SET updated_at = 'nonsense'")
+        async with await Database.open(path) as db:
+            moved = await db.migrate_group_id(old_group_id=GROUP_A, new_group_id=GROUP_B)
+
+            assert moved == GroupMigration(flips=1, active_flips=0)
+            assert await db.last_flip_request(GROUP_A) is None
+            with pytest.raises(CorruptRecordError):
+                await db.last_flip_request(GROUP_B)
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 1
+
+
+def test_migrate_group_id_compares_last_flip_times_as_moments_not_as_text(
+    tmp_path: Path,
+) -> None:
+    """Two rows written in different offsets sort by their letters, not their moment.
+
+    The old id's row is the later date as text and the earlier moment in fact, so
+    reading the times as times is what keeps the destination's genuinely newer row.
+    """
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+            await db.record_flip(request_flip(GROUP_B, SETTINGS_TWO, seed_byte=2))
+        tamper(
+            path,
+            "UPDATE group_last_flip SET updated_at = ? WHERE group_id = ?",
+            ("2026-01-02T00:30:00+05:00", GROUP_A),
+        )
+        tamper(
+            path,
+            "UPDATE group_last_flip SET updated_at = ? WHERE group_id = ?",
+            ("2026-01-01T20:00:00+00:00", GROUP_B),
+        )
+        async with await Database.open(path) as db:
+            await db.migrate_group_id(old_group_id=GROUP_A, new_group_id=GROUP_B)
+
+            assert await db.last_flip_request(GROUP_B) == FlipRequest(10, 6, 1, 8)
+            assert await db.last_flip_request(GROUP_A) is None
 
     asyncio.run(scenario())
     assert count_rows(path, "group_last_flip") == 1

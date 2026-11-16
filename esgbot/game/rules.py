@@ -29,7 +29,8 @@ Two boards take ten cards from the 52, which leaves 42 for the players, so at
 most ``floor(42 / x)`` players fit in one flip.
 
 **Only the wager and the private-card count have to be given.** ``/flip`` takes
-the settings in order, so a command may stop after either of the first two:
+the settings in order, so a command may stop after the private-card count or
+after the extra-card count:
 :class:`FlipRequest` is what a command asks for, with a ``None`` standing for a
 value the bot fills in -- :data:`Y_DEFAULT` for the extra cards, which the deal
 reads as "as many as the deck can give every seat", and the number of players for
@@ -241,7 +242,34 @@ class FlipRequest:
         This is how a stored flip says what was typed: the row holds the resolved
         values and a flag per defaulted one, and the two together are the command
         again. With neither flag it is the same flip written out in full.
+
+        A flag has to agree with the figure beside it, or the pair is not a
+        command anybody could have typed and taking the flag's word for it would
+        hand ``/again`` a request nobody made. What the bot fills in is
+        :data:`Y_DEFAULT` for the extra cards and the number of players for the
+        scoop multiplier, and a flip has from :data:`MIN_PLAYERS` to
+        :func:`max_players` of them, which is as much as can be said without
+        knowing the table. A caller that does know it --
+        :class:`~esgbot.storage.models.FinishedFlip`, which has the deal -- holds
+        a defaulted ``Z`` to that exact count.
+
+        Raises:
+            SettingsError: if a value the flags call defaulted is not one the bot
+                would have filled in.
         """
+        _, _, extra, scoop = SETTING_FIELDS
+        if y_defaulted and settings.y != Y_DEFAULT:
+            raise SettingsError(
+                f"{extra} was left out of the command, so it must be {Y_DEFAULT:,}. "
+                f"Got {settings.y:,}.",
+                field=extra,
+            )
+        if z_defaulted and not MIN_PLAYERS <= settings.z <= settings.max_players:
+            raise SettingsError(
+                f"{scoop} was left out of the command, so it must be the number of players: "
+                f"{_range_clause(MIN_PLAYERS, settings.max_players)}. Got {settings.z:,}.",
+                field=scoop,
+            )
         return cls(
             wager=settings.wager,
             x=settings.x,

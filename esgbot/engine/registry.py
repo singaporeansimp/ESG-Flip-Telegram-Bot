@@ -12,6 +12,10 @@ then fails, the place is given back. Flips take themselves out when they finish,
 are cancelled or are voided. :meth:`FlipRegistry.migrate_group` moves one from
 the id a group had to the id Telegram has just given it, so a flip in a group
 that becomes a supergroup keeps playing in the same chat under its new number.
+The id it has left behind goes on naming that group for the rest of the run --
+:meth:`FlipRegistry.group_id_for` is how every slot here is found -- because a
+command the bot is part way through reading was read under the old id, and a
+flip opened under it would be a second flip in a chat that is allowed one.
 
 This is all in memory. Nothing here survives a restart, which is the point: the
 flips that were open are the rows the next start finds and voids. The one thing
@@ -38,7 +42,7 @@ from esgbot.engine.clock import Clock, SystemClock
 from esgbot.engine.flip import Flip, Settler, settle_in_thread
 from esgbot.engine.gateway import Gateway
 from esgbot.engine.store import FlipStore
-from esgbot.engine.views import Player
+from esgbot.engine.views import Player, VoidReason
 from esgbot.game.rules import FlipRequest, Settings
 from esgbot.logging_setup import get_logger
 
@@ -66,7 +70,16 @@ class FlipAlreadyOpenError(Exception):
 class FlipRegistry:
     """The flips that are open, by group and by token."""
 
-    __slots__ = ("_by_group", "_by_token", "_clock", "_gateway", "_settle", "_store")
+    __slots__ = (
+        "_by_group",
+        "_by_token",
+        "_clock",
+        "_gateway",
+        "_moved",
+        "_settle",
+        "_store",
+        "_voiding",
+    )
 
     def __init__(
         self,
@@ -87,6 +100,8 @@ class FlipRegistry:
         self._settle = settle
         self._by_group: dict[int, Flip] = {}
         self._by_token: dict[str, Flip] = {}
+        self._moved: dict[int, int] = {}
+        self._voiding: set[asyncio.Task[None]] = set()
 
     def __len__(self) -> int:
         return len(self._by_token)
@@ -112,9 +127,27 @@ class FlipRegistry:
         """Every flip that is open, in no particular order."""
         return tuple(self._by_token.values())
 
+    def group_id_for(self, group_id: int) -> int:
+        """The id this group is keyed by now, following every move it has made.
+
+        A group that becomes a supergroup is the same group under a new id, and
+        :meth:`migrate_group` writes the pair down, so an id Telegram has retired
+        still names the group it belonged to. Everything here that is about "this
+        group" goes through this, which is what makes one flip per group hold for
+        a command that arrived under an id the group has since left behind.
+        """
+        # Bounded by the number of moves known, so a pair of ids pointing at each
+        # other cannot loop.
+        for _ in range(len(self._moved)):
+            moved = self._moved.get(group_id)
+            if moved is None:
+                break
+            group_id = moved
+        return group_id
+
     def flip_for_group(self, group_id: int) -> Flip | None:
-        """The flip open in this group, or ``None``."""
-        return self._by_group.get(group_id)
+        """The flip open in this group, or ``None``, whichever id it is asked for."""
+        return self._by_group.get(self.group_id_for(group_id))
 
     def flip_for_token(self, token: str) -> Flip | None:
         """The flip a button press belongs to, or ``None`` if this process never knew it."""
@@ -138,12 +171,19 @@ class FlipRegistry:
         the bot, or plain :class:`~esgbot.game.rules.Settings` when it gave all
         four. Either way the flip resolves them at Start; see :class:`Flip`.
 
+        ``group_id`` is taken as naming a chat rather than as a key: a command
+        that was read under an id the group has since left behind -- one that
+        waited on storage while the migration arrived -- opens its flip under the
+        id the group is keyed by now, or is refused because that is where the
+        group's one flip already is. See :meth:`group_id_for`.
+
         Raises:
             FlipAlreadyOpenError: if this group already has one open.
             PermanentFailureError: if the lobby message cannot be posted.
             StorageError, sqlite3.Error: if the flip's row cannot be written.
                 Either way no flip is left behind and the group can try again.
         """
+        group_id = self.group_id_for(group_id)
         open_already = self._by_group.get(group_id)
         if open_already is not None:
             raise FlipAlreadyOpenError(open_already)
@@ -184,31 +224,52 @@ class FlipRegistry:
         write, and a write that fails is logged rather than raised. The group's
         finished flips move separately, with the rest of its history.
 
-        The old id is left free. Telegram sends nothing there once a group has
-        moved, so nothing can arrive to use it.
+        **The old id is not left free**: the pair is written down, so it goes on
+        naming this group for as long as the bot runs, whether or not there was
+        a flip to move. Telegram sends nothing to a retired id, but the bot can
+        still be holding a command that arrived under one -- a ``/again`` part
+        way through reading the group's last settings -- and a flip opened under
+        a dead id is a second flip in a chat that is only allowed one. See
+        :meth:`group_id_for`.
+
+        A clash is the one case nothing can be made tidy: both ids have a flip,
+        so one chat has two, and the move has nowhere to go. The flip on the id
+        Telegram has retired is the one that cannot stay, so it is taken out
+        here and voided -- which clears its row and tells the group -- and the
+        flip in the group that still exists keeps its place. Telegram only
+        migrates a group to an id nothing has used, so this takes a ``/flip``
+        under the new id before the bot has heard of the move.
 
         Returns:
             The flip that moved, or ``None`` when there was nothing to move: the
-            two ids are the same, the group had no flip open, or its flip is
-            over and already forgotten. One that has closed but is still here
-            moves too, so the last thing it has to say lands in the group that
-            still exists.
-
-        Raises:
-            FlipAlreadyOpenError: if the new id already has a flip of its own,
-                which would leave one group with two. Telegram only migrates a
-                group to an id nothing has used, so this does not arise; the
-                flip already in the new group keeps its place, and the one that
-                could not move is left alone.
+            two ids are the same or already known to be, the group had no flip
+            open, its flip is over and already forgotten, or the new id had a
+            flip of its own and this group's was voided. One that has closed but
+            is still here moves too, so the last thing it has to say lands in
+            the group that still exists.
         """
+        old_group_id = self.group_id_for(old_group_id)
         if old_group_id == new_group_id:
             return None
+        # Written down before anything else, and before the first await, so no
+        # command can reserve the old id from here on and nothing can find the
+        # registry and the flip disagreeing about which group this is.
+        self._moved[old_group_id] = new_group_id
         flip = self._by_group.get(old_group_id)
         if flip is None:
             return None
         open_already = self._by_group.get(new_group_id)
         if open_already is not None:
-            raise FlipAlreadyOpenError(open_already)
+            _logger.error(
+                "group %d became %d, which already has flip %s open; its own flip %s is voided",
+                old_group_id,
+                new_group_id,
+                open_already.token,
+                flip.token,
+            )
+            self._forget(flip)
+            self._abandon(flip)
+            return None
         del self._by_group[old_group_id]
         self._by_group[new_group_id] = flip
         await flip._follow_group(new_group_id)
@@ -216,6 +277,21 @@ class FlipRegistry:
             "flip %s moved with its group from %d to %d", flip.token, old_group_id, new_group_id
         )
         return flip
+
+    def _abandon(self, flip: Flip) -> None:
+        """Have a flip void itself, without waiting for it.
+
+        Not awaited, because the move that abandons it may have been discovered
+        by this very flip's own send: the gateway follows a new group id from
+        inside the call that was refused with it, and the flip holds its output
+        while that call is in flight, so it cannot post a void notice until the
+        send that started all this has let go. The task is held until it is done,
+        so nothing collects it part way through, and a bot that stops before it
+        finishes leaves the flip's row for the next start to void.
+        """
+        voiding = asyncio.create_task(flip.void(VoidReason.ERROR), name=f"void-{flip.token}")
+        self._voiding.add(voiding)
+        voiding.add_done_callback(self._voiding.discard)
 
     def close(self) -> None:
         """Drop every open flip's timers and forget them, abruptly.

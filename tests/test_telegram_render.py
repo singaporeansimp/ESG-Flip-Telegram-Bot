@@ -47,6 +47,7 @@ from esgbot.game.rules import (
     WAGER_MIN,
     X_MAX,
     X_MIN,
+    Y_DEFAULT,
     Y_MAX,
     Y_MIN,
     Z_MAX,
@@ -1154,6 +1155,23 @@ def test_already_open_for_a_defaulted_flip_invents_no_figures() -> None:
         "$75 a head · 6 private cards each · as many extra cards as fit · "
         "scoop pays the wager times the number of players"
     )
+    assert "21" not in text
+
+
+def test_already_open_for_a_started_flip_names_the_figures_start_settled() -> None:
+    """Once Start has fixed the player list the scoop multiplier is a number.
+
+    The group is being sent to a flip that is already paying that number, so
+    saying "the number of players" would be describing a question it has
+    answered.
+    """
+    text = render.render_already_open(
+        FlipRequest(wager=75, x=6), Settings(wager=75, x=6, y=Y_DEFAULT, z=3)
+    )
+    assert text.splitlines()[1] == (
+        "$75 a head · 6 private cards each · as many extra cards as fit · scoop pays 3x the wager"
+    )
+    # A defaulted Y stays in words, because 21 would promise cards the deck has not got.
     assert "21" not in text
 
 

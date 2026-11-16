@@ -192,18 +192,10 @@ async def follow_group_move(
     Two things tell the bot about a move: the service message Telegram sends to
     the group, and a call the gateway makes being refused with the new id. Both
     come through here, and whichever is second finds nothing left to do -- the
-    registry has no flip on the old id any more, and the rewrite moves no rows --
-    so it does not matter which arrives first.
+    registry already knows the old id is this group's, and the rewrite moves no
+    rows -- so it does not matter which arrives first.
     """
-    try:
-        await registry.migrate_group(old_group_id=old_group_id, new_group_id=new_group_id)
-    except FlipAlreadyOpenError as clash:
-        _logger.error(
-            "group %d became %d, which already has flip %s open; its own flip stays put",
-            old_group_id,
-            new_group_id,
-            clash.flip.token,
-        )
+    await registry.migrate_group(old_group_id=old_group_id, new_group_id=new_group_id)
     try:
         moved = await store.migrate_group_id(old_group_id=old_group_id, new_group_id=new_group_id)
     except (StorageError, sqlite3.Error) as error:
@@ -263,7 +255,10 @@ def build_router(
                 settings=request,
             )
         except FlipAlreadyOpenError as already:
-            await gateway.say(target, render.render_already_open(already.flip.request))
+            await gateway.say(
+                target,
+                render.render_already_open(already.flip.request, already.flip.settings),
+            )
         except PermanentFailureError:
             # The lobby would not post, so there is nowhere to complain about it.
             _logger.warning(

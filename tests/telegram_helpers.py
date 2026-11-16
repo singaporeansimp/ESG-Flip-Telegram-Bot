@@ -418,12 +418,20 @@ class FakeDatabase(FakeStore):
     to :attr:`connection` directly -- ``PRAGMA ignore_check_constraints = ON``
     first, as the storage tests do -- which is how a test tampers with a stored
     flip and then watches ``/verify`` catch it.
+
+    Set ``last_flip_go`` to an event to sit on the last-flip read once it has
+    happened: ``last_flip_reached`` is set when the row has been read and the
+    answer not yet handed back, and the event lets it go. That gap is where the
+    group the command was typed in can be given a new id, which is what
+    ``/again`` has to survive.
     """
 
     __slots__ = (
         "connection",
         "fetch_error",
         "last_flip_error",
+        "last_flip_go",
+        "last_flip_reached",
         "list_error",
         "migrate_error",
         "migrations",
@@ -439,6 +447,8 @@ class FakeDatabase(FakeStore):
         self.stats_error: Exception | None = None
         self.fetch_error: Exception | None = None
         self.last_flip_error: Exception | None = None
+        self.last_flip_go: asyncio.Event | None = None
+        self.last_flip_reached = asyncio.Event()
         self.migrations: list[tuple[int, int]] = []
 
     async def close(self) -> None:
@@ -502,12 +512,18 @@ class FakeDatabase(FakeStore):
         Answered by the real query over the real ``group_last_flip`` row, which
         :meth:`record_flip` wrote in the same transaction as the flip, so a test
         that plays a flip and then types ``/again`` is reading what the bot
-        would read. ``last_flip_error`` is the failure that path is tested with.
+        would read. ``last_flip_error`` is the failure that path is tested with,
+        and ``last_flip_go`` holds the answer back once the row has been read.
         """
         await asyncio.sleep(0)
         if self.last_flip_error is not None:
             raise self.last_flip_error
-        return queries.last_flip_request(self.connection, group_id)
+        request = queries.last_flip_request(self.connection, group_id)
+        go = self.last_flip_go
+        if go is not None:
+            self.last_flip_reached.set()
+            await go.wait()
+        return request
 
     # -------------------------------------------------------- the whole group
 

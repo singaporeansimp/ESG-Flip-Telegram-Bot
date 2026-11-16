@@ -29,7 +29,9 @@ or 1 per value, and the group's own ``group_last_flip`` row holds the same
 settings and flags for the last flip it finished -- that row is what ``/again``
 reads, and :func:`record_flip` writes it in the same transaction as the flip
 that set it. On the way back out a flag is read as strictly as a number is: a
-column holding anything but 0 or 1 fails the row.
+column holding anything but 0 or 1 fails the row, and so does a flag that
+contradicts the figure beside it, because the bot fills a left-out value in with
+one particular number and not with whatever is in the column.
 """
 
 from __future__ import annotations
@@ -109,7 +111,13 @@ ON CONFLICT(group_id) DO UPDATE SET
 """
 
 _SELECT_LAST_FLIP: Final = """
-SELECT wager, x, y, z, y_defaulted, z_defaulted
+SELECT wager, x, y, z, y_defaulted, z_defaulted, updated_at
+FROM group_last_flip
+WHERE group_id = :group_id
+"""
+
+_SELECT_LAST_FLIP_TIME: Final = """
+SELECT updated_at
 FROM group_last_flip
 WHERE group_id = :group_id
 """
@@ -349,8 +357,11 @@ def last_flip_request(connection: sqlite3.Connection, group_id: int) -> FlipRequ
 
     The settings as they were typed: a ``Y`` or ``Z`` the command left out comes
     back left out, so repeating the request fills it in again for whoever is at
-    the table this time. The figure beside a flag is what that value was filled
-    in with at the time and is not read.
+    the table this time. The figure beside a flag is not the request, but it is
+    checked against it: a flag saying the bot filled a value in, next to a figure
+    the bot would never have filled in, is a damaged row rather than a command,
+    and :meth:`~esgbot.game.rules.FlipRequest.from_settings` is where the two are
+    held to each other.
 
     Groups never mix: this is one row per group, written by the flips that group
     finished and by nothing else.
@@ -364,6 +375,10 @@ def last_flip_request(connection: sqlite3.Connection, group_id: int) -> FlipRequ
     row = connection.execute(_SELECT_LAST_FLIP, {"group_id": group_id}).fetchone()
     if row is None:
         return None
+    # Read for its own sake: nothing in the request needs the time, but a row
+    # that cannot say when it was written is damaged like any other, and that
+    # time is what decides the row's fate if the group is given a new id.
+    _last_flip_time(row, group_id)
     try:
         settings = _settings_from(row)
         return FlipRequest.from_settings(
@@ -372,9 +387,7 @@ def last_flip_request(connection: sqlite3.Connection, group_id: int) -> FlipRequ
             z_defaulted=_flag(row["z_defaulted"], "z_defaulted"),
         )
     except (ValueError, TypeError) as error:
-        record = f"the last flip settings of group {group_id}"
-        _logger.warning("%s cannot be read back: %s", record, error)
-        raise CorruptRecordError(record, str(error)) from error
+        raise _damaged_last_flip(group_id, error) from error
 
 
 def add_active_flip(connection: sqlite3.Connection, active: ActiveFlip) -> None:
@@ -571,6 +584,11 @@ def migrate_group_id(
         How many rows moved in ``flips`` and ``active_flips``. Both are zero when
         the two ids are the same, which is a no-op rather than an error. The
         last-flip row is one row either way and is not counted.
+
+    Raises:
+        CorruptRecordError: if both ids have a last-flip row and one of them
+            cannot say when it was written, so which to keep cannot be decided.
+            Nothing moves: see :func:`_move_last_flip`.
     """
     if old_group_id == new_group_id:
         return GroupMigration(flips=0, active_flips=0)
@@ -598,31 +616,52 @@ def migrate_group_id(
 def _move_last_flip(connection: sqlite3.Connection, parameters: Mapping[str, int]) -> None:
     """Move one group's last-flip row to its new id, keeping the newer of a clash.
 
-    Three statements, in this order, so that whichever row is kept is the only
-    one left to move: drop the new id's row if the old id's is strictly newer,
-    then drop the old id's if anything is still sitting at the new id, then move
-    what remains. The times are ISO-8601 UTC, which sorts chronologically as
-    text, and a missing row makes the comparison ``NULL`` so nothing is dropped.
+    The rule :func:`migrate_group_id` states, applied: with a row on one of the
+    two ids only there is nothing to decide and it simply moves, and when both
+    have one the loser is deleted so that what is kept is the only row left to
+    move. The two times are read as times rather than compared as text, because
+    two rows written in different offsets sort by their letters and not by their
+    moment.
+
+    Raises:
+        CorruptRecordError: if a row the decision rests on does not hold a time.
+            There is no honest way to choose then, and choosing anyway would
+            quietly leave a group repeating settings that are not its own. A row
+            on one id only is moved without being read, so a damaged one costs
+            the group its ``/again`` rather than its whole history.
     """
-    connection.execute(
-        """
-        DELETE FROM group_last_flip
-        WHERE group_id = :new
-          AND updated_at < (SELECT updated_at FROM group_last_flip WHERE group_id = :old)
-        """,
-        parameters,
-    )
-    connection.execute(
-        """
-        DELETE FROM group_last_flip
-        WHERE group_id = :old
-          AND EXISTS (SELECT 1 FROM group_last_flip AS kept WHERE kept.group_id = :new)
-        """,
-        parameters,
-    )
+    old, new = parameters["old"], parameters["new"]
+    old_row = connection.execute(_SELECT_LAST_FLIP_TIME, {"group_id": old}).fetchone()
+    if old_row is None:
+        return
+    new_row = connection.execute(_SELECT_LAST_FLIP_TIME, {"group_id": new}).fetchone()
+    if new_row is not None:
+        if _last_flip_time(old_row, old) <= _last_flip_time(new_row, new):
+            connection.execute("DELETE FROM group_last_flip WHERE group_id = :old", parameters)
+            return
+        connection.execute("DELETE FROM group_last_flip WHERE group_id = :new", parameters)
     connection.execute(
         "UPDATE group_last_flip SET group_id = :new WHERE group_id = :old", parameters
     )
+
+
+def _last_flip_time(row: Mapping[str, Any], group_id: int) -> datetime:
+    """When a group's last-flip row was set, as the UTC moment it stands for.
+
+    Raises:
+        CorruptRecordError: if the column does not hold a time.
+    """
+    try:
+        return _time_from_text(row["updated_at"], "updated_at")
+    except (ValueError, TypeError) as error:
+        raise _damaged_last_flip(group_id, error) from error
+
+
+def _damaged_last_flip(group_id: int, error: Exception) -> CorruptRecordError:
+    """The error a last-flip row that will not read back raises, logged as it is made."""
+    record = f"the last flip settings of group {group_id}"
+    _logger.warning("%s cannot be read back: %s", record, error)
+    return CorruptRecordError(record, str(error))
 
 
 def _rank_key(stats: PlayerStats) -> tuple[int, int, str, str, int]:

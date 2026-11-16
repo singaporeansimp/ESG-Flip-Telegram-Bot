@@ -15,6 +15,7 @@ import contextlib
 import logging
 import re
 import sqlite3
+from collections.abc import Sequence
 
 import pytest
 from aiogram.exceptions import TelegramMigrateToChat
@@ -923,7 +924,7 @@ def test_a_flip_open_when_its_group_migrates_plays_out_in_the_new_chat() -> None
 
         assert flip.group_id == _NEW_GROUP
         assert world.registry.flip_for_group(_NEW_GROUP) is flip
-        assert world.registry.flip_for_group(GROUP) is None
+        assert world.registry.group_id_for(GROUP) == _NEW_GROUP
         assert world.store.active[flip.token].group_id == _NEW_GROUP
 
         await world.feed(message=group_message("/flip 50 5 2 3", chat_id=_NEW_GROUP))
@@ -965,7 +966,7 @@ def test_a_table_edit_refused_with_the_new_group_id_keeps_the_flip_playing() -> 
         assert flip.group_id == _NEW_GROUP
         assert world.store.active[flip.token].group_id == _NEW_GROUP
         assert world.registry.flip_for_group(_NEW_GROUP) is flip
-        assert world.registry.flip_for_group(GROUP) is None
+        assert world.registry.group_id_for(GROUP) == _NEW_GROUP
         assert (GROUP, _NEW_GROUP) in world.store.migrations
         assert world.gateway.chat_id_for(GROUP) == _NEW_GROUP
         assert world.client.edits[edited_before].chat_id == _NEW_GROUP
@@ -1129,6 +1130,36 @@ def test_the_player_cap_of_a_defaulted_flip_comes_from_x_alone() -> None:
         flip = await _open_typed(world, "/flip 50 21")
 
         assert flip.request.max_players == 2
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_second_flip_is_refused_with_the_figures_the_open_one_started_on() -> None:
+    """A defaulted ``Z`` is a figure once Start has counted the table.
+
+    Before Start the refusal can only name the question; after it, the flip the
+    group is being sent to is paying a number, so that is what it is described by.
+    """
+
+    async def scenario() -> None:
+        world = bot_harness()
+        flip = await _open_typed(world, "/flip 50 5 2")
+        await _press(world, flip, Press.JOIN, user_id=_JOINER, name="Pat")
+        assert "the number of players" in world.client.sends[0].text
+
+        await world.flip_command("/flip 10 6")
+        before_start = world.client.sends[-1].text
+        await _press(world, flip, Press.START)
+        await world.flip_command("/flip 10 6")
+        after_start = world.client.sends[-1].text
+
+        assert flip.settings == rules.Settings(wager=50, x=5, y=2, z=2)
+        assert "scoop pays the wager times the number of players" in before_start
+        assert "scoop pays 2x the wager" in after_start
+        assert "the number of players" not in after_start
+        assert world.registry.flips == (flip,)
+        await _play_out(world, flip)
         await world.close()
 
     asyncio.run(scenario())
@@ -1470,6 +1501,87 @@ def test_a_flip_opened_by_again_is_recorded_as_typed_so_again_can_repeat_it() ->
         third = world.registry.flip_for_group(GROUP)
         assert third is not None
         assert third.request == rules.FlipRequest(wager=50, x=5)
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def _lobbies(calls: Sequence[Call]) -> list[Call]:
+    """The sends among these that are lobby messages: four buttons is a lobby."""
+    return [call for call in calls if call.kind == "send" and len(call.buttons) == 4]
+
+
+def test_again_held_across_a_migration_does_not_open_a_second_flip_in_the_chat() -> None:
+    """``/again`` reads the group's settings on one id and acts on another.
+
+    The read is held; the service message moves the group; a ``/flip`` in the new
+    id opens the one flip that chat is allowed; and only then does ``/again``
+    come back, with the id it was typed under -- which Telegram has retired. It
+    has to land on the group's one slot and be refused, not open a second lobby
+    in the same chat under the dead id.
+    """
+
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        world.store.last_flip_go = asyncio.Event()
+        calls_before = len(world.client.calls)
+
+        pending = asyncio.create_task(world.feed(message=group_message("/again")))
+        await world.store.last_flip_reached.wait()
+        await world.feed(message=migration_message(new_group_id=_NEW_GROUP))
+        await world.feed(message=group_message("/flip 10 5", chat_id=_NEW_GROUP))
+        opened = world.registry.flip_for_group(_NEW_GROUP)
+        assert opened is not None
+        # The refusal is sent to the id /again was typed under, which Telegram
+        # answers with the new one, so it still reaches the group.
+        world.client.failures.append(
+            TelegramMigrateToChat(
+                method=EditMessageText(chat_id=GROUP, message_id=1, text="x"),
+                message="group migrated",
+                migrate_to_chat_id=_NEW_GROUP,
+            )
+        )
+        world.store.last_flip_go.set()
+        await pending
+
+        assert world.registry.flips == (opened,)
+        assert opened.request == rules.FlipRequest(wager=10, x=5)
+        assert world.registry.flip_for_group(GROUP) is opened
+        later = world.client.calls[calls_before:]
+        assert len(_lobbies(later)) == 1
+        assert _lobbies(later)[0].chat_id == _NEW_GROUP
+        refusal = world.client.of("send")[-1]
+        assert refusal.text == render.render_already_open(opened.request)
+        assert refusal.chat_id == _NEW_GROUP
+        assert [row.group_id for row in world.store.active.values()] == [_NEW_GROUP]
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_flip_arriving_under_a_retired_id_opens_in_the_group_that_id_belonged_to() -> None:
+    """``/flip`` goes through the same slot as ``/again``, so the same rule holds.
+
+    Nothing in ``/flip`` waits before the slot is claimed, so this is the command
+    arriving after the move rather than being overtaken by one; either way the
+    chat gets one flip, under the id it answers to now.
+    """
+
+    async def scenario() -> None:
+        world = bot_harness()
+        await world.feed(message=migration_message(new_group_id=_NEW_GROUP))
+        sends_before = len(world.client.sends)
+
+        await world.feed(message=group_message("/flip 10 5", chat_id=GROUP))
+
+        flip = world.registry.flip_for_group(_NEW_GROUP)
+        assert flip is not None
+        assert world.registry.flips == (flip,)
+        assert flip.group_id == _NEW_GROUP
+        assert world.store.active[flip.token].group_id == _NEW_GROUP
+        lobbies = _lobbies(world.client.sends[sends_before:])
+        assert [lobby.chat_id for lobby in lobbies] == [_NEW_GROUP]
         await world.close()
 
     asyncio.run(scenario())

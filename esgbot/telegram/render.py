@@ -917,17 +917,25 @@ def render_settings_error(error: SettingsError) -> str:
     return f"⚠️ {settings_error_text(error)}\n\n{USAGE_SHORT if error.field else USAGE}"
 
 
-def render_already_open(request: FlipRequest) -> str:
+def render_already_open(request: FlipRequest, settings: Settings | None = None) -> str:
     """The refusal when the group already has a flip open.
 
-    The flip that is open may not have started, so what it is described by is
-    what it was asked for -- the one thing that is true of it at either point.
+    ``settings`` is that flip's, once Start has settled them, and is what the
+    refusal describes: a scoop multiplier the command left out is a figure by
+    then, so the flip the group is being sent to can be named by what it is
+    paying rather than by the question it has already answered. A lobby that has
+    not started has only what it was asked for, where that ``Z`` is still
+    whatever the next Join makes it.
     """
+    if settings is None:
+        what = f"{_a_head(request.wager)} · {_request_strip(request)}"
+    else:
+        what = (
+            f"{_a_head(settings.wager)} · "
+            f"{_settings_strip(settings, y_defaulted=request.y_defaulted)}"
+        )
     return _block(
-        [
-            "⚠️ <b>A flip is already open here</b>",
-            f"{_a_head(request.wager)} · {_request_strip(request)}",
-        ],
+        ["⚠️ <b>A flip is already open here</b>", what],
         ["Join that one, or wait for it to finish, before starting another."],
     )
 

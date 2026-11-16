@@ -1238,7 +1238,9 @@ def test_a_migrated_flip_keeps_its_slot_token_and_topic_under_the_new_id() -> No
 
             assert moved is flip
             assert world.registry.flip_for_group(_MIGRATED_GROUP) is flip
-            assert world.registry.flip_for_group(world.group_id) is None
+            # The slot moved, and the old id still names the group it belonged to.
+            assert world.registry.group_id_for(world.group_id) == _MIGRATED_GROUP
+            assert world.registry.flip_for_group(world.group_id) is flip
             assert world.registry.flip_for_token(flip.token) is flip
             assert len(world.registry) == 1
             assert flip.group_id == _MIGRATED_GROUP
@@ -1338,7 +1340,9 @@ def test_the_flip_recorded_after_a_migration_carries_the_new_group_id() -> None:
     asyncio.run(scenario())
 
 
-def test_the_new_id_is_refused_a_second_flip_but_the_old_id_is_left_free() -> None:
+def test_either_id_is_refused_a_second_flip_once_a_group_has_moved() -> None:
+    """Both ids are one chat, which gets one flip, whichever id asks for it."""
+
     async def scenario() -> None:
         world = harness()
         async with world.registry:
@@ -1347,22 +1351,44 @@ def test_the_new_id_is_refused_a_second_flip_but_the_old_id_is_left_free() -> No
                 old_group_id=world.group_id, new_group_id=_MIGRATED_GROUP
             )
 
-            with pytest.raises(FlipAlreadyOpenError) as refused:
-                await world.registry.create_flip(
-                    group_id=_MIGRATED_GROUP, starter=player(20), settings=world.settings
-                )
-            assert refused.value.flip is moved
-            assert refused.value.group_id == _MIGRATED_GROUP
+            for asked in (_MIGRATED_GROUP, world.group_id):
+                with pytest.raises(FlipAlreadyOpenError) as refused:
+                    await world.registry.create_flip(
+                        group_id=asked, starter=player(20), settings=world.settings
+                    )
+                assert refused.value.flip is moved
+                assert refused.value.group_id == _MIGRATED_GROUP
 
-            # Telegram sends nothing to a migrated-away id, so reusing it is harmless
-            # and deliberately allowed; it gets its own slot and leaves the moved flip be.
-            reused = await world.open_lobby(joiners=0)
-            assert reused is not moved
-            assert world.registry.flip_for_group(world.group_id) is reused
-            assert world.registry.flip_for_group(_MIGRATED_GROUP) is moved
+            assert world.registry.flips == (moved,)
             assert moved.group_id == _MIGRATED_GROUP
-            assert reused.group_id == world.group_id
-            assert len(world.registry) == 2
+            assert len(world.registry) == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_flip_opened_under_a_retired_id_opens_in_the_group_that_id_belonged_to() -> None:
+    """A command read before the move and acted on after it is still that group's.
+
+    The id it was read under is dead, so a flip keyed by it would be a second
+    flip in the chat and would be talking to nobody.
+    """
+
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            await world.registry.migrate_group(
+                old_group_id=world.group_id, new_group_id=_MIGRATED_GROUP
+            )
+
+            late = await world.registry.create_flip(
+                group_id=world.group_id, starter=player(20), settings=world.settings
+            )
+
+            assert late.group_id == _MIGRATED_GROUP
+            assert world.registry.flip_for_group(_MIGRATED_GROUP) is late
+            assert world.registry.flip_for_group(world.group_id) is late
+            assert len(world.registry) == 1
+            assert world.store.active[late.token].group_id == _MIGRATED_GROUP
 
     asyncio.run(scenario())
 
@@ -1392,24 +1418,36 @@ def test_migrating_to_the_same_id_or_from_a_group_with_no_flip_does_nothing() ->
     asyncio.run(scenario())
 
 
-def test_migrating_onto_a_group_that_has_a_flip_is_refused_and_moves_nothing() -> None:
+def test_migrating_onto_a_group_that_has_a_flip_voids_the_one_that_cannot_move() -> None:
+    """One chat cannot keep two flips, so the one on the retired id is given up.
+
+    Both of them are in the chat the new id names, and the move has nowhere to
+    put the one that was there before.
+    """
+
     async def scenario() -> None:
         world = harness()
         async with world.registry:
-            first = await world.open_lobby(joiners=0)
-            second = await world.open_lobby(joiners=0, group_id=_OTHER_GROUP)
+            stale = await world.open_lobby(joiners=0)
+            kept = await world.open_lobby(joiners=0, group_id=_OTHER_GROUP)
 
-            with pytest.raises(FlipAlreadyOpenError) as refused:
-                await world.registry.migrate_group(
-                    old_group_id=world.group_id, new_group_id=_OTHER_GROUP
-                )
+            moved = await world.registry.migrate_group(
+                old_group_id=world.group_id, new_group_id=_OTHER_GROUP
+            )
+            # Giving it up is the registry's own task, so it runs on the next
+            # pass rather than inside the move: see FlipRegistry._abandon.
+            await world.clock.quiesce()
 
-            assert refused.value.flip is second
-            assert world.registry.flip_for_group(world.group_id) is first
-            assert world.registry.flip_for_group(_OTHER_GROUP) is second
-            assert first.group_id == world.group_id
-            assert second.group_id == _OTHER_GROUP
-            assert len(world.registry) == 2
+            assert moved is None
+            assert stale.closed
+            assert _phase(stale) is FlipPhase.VOIDED
+            assert stale.token not in world.store.active
+            # The surviving flip keeps its place, and both ids now name its chat.
+            assert world.registry.flips == (kept,)
+            assert world.registry.flip_for_group(_OTHER_GROUP) is kept
+            assert world.registry.flip_for_group(world.group_id) is kept
+            assert kept.group_id == _OTHER_GROUP
+            assert _phase(kept) is FlipPhase.LOBBY
 
     asyncio.run(scenario())
 

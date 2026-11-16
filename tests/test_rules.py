@@ -7,6 +7,7 @@ import pytest
 
 from esgbot.game.rules import (
     FLIP_FIELDS_MIN,
+    MIN_PLAYERS,
     SETTING_FIELDS,
     WAGER_MAX,
     WAGER_MIN,
@@ -446,6 +447,34 @@ def test_from_settings_then_resolve_gives_back_the_settings(
 ) -> None:
     request = FlipRequest.from_settings(_FULL, y_defaulted=y_defaulted, z_defaulted=z_defaulted)
     assert request.resolve(3) == _FULL
+
+
+def test_from_settings_refuses_a_defaulted_y_the_bot_would_not_have_filled_in() -> None:
+    with pytest.raises(SettingsError, match="Extra cards was left out") as caught:
+        FlipRequest.from_settings(Settings(50, 5, 2, 3), y_defaulted=True)
+    assert caught.value.field == "Extra cards"
+    assert str(Y_DEFAULT) in str(caught.value)
+
+
+@pytest.mark.parametrize("z", [Z_MIN, 9, Z_MAX])
+def test_from_settings_refuses_a_defaulted_z_no_table_could_have_come_to(z: int) -> None:
+    """A defaulted Z was the number of players, and a flip seats 2 to floor(42/x)."""
+    with pytest.raises(SettingsError, match="Scoop multiplier was left out") as caught:
+        FlipRequest.from_settings(Settings(50, 5, 2, z), z_defaulted=True)
+    assert caught.value.field == "Scoop multiplier"
+
+
+@pytest.mark.parametrize("x", range(X_MIN, X_MAX + 1))
+def test_from_settings_takes_every_defaulted_z_a_table_of_that_x_could_seat(x: int) -> None:
+    for players in range(MIN_PLAYERS, max_players(x) + 1):
+        settings = Settings(wager=50, x=x, y=Y_DEFAULT, z=players)
+        request = FlipRequest.from_settings(settings, y_defaulted=True, z_defaulted=True)
+        assert request == FlipRequest(50, x)
+        assert request.resolve(players) == settings
+    with pytest.raises(SettingsError):
+        FlipRequest.from_settings(
+            Settings(wager=50, x=x, y=Y_DEFAULT, z=max_players(x) + 1), z_defaulted=True
+        )
 
 
 # --- max_players ---------------------------------------------------------------
