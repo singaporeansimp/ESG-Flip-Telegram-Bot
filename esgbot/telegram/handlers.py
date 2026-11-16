@@ -275,7 +275,7 @@ def build_router(
 
     @router.message(Command("flip"))
     async def open_flip(message: Message, command: CommandObject) -> None:
-        """``/flip <wager> <X> [<Y> [<Z>]]``: read the settings and open a lobby.
+        """``/flip <wager> <private cards> [extra cards] [scoop multiplier]``: open a lobby.
 
         The wager and X are required; Y and Z are positional, so what is left
         off the end is what the bot fills in -- Y with the maximum, which the

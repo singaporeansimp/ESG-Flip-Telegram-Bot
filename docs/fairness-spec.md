@@ -98,6 +98,10 @@ not measurable and not worth correcting for.)
 Inputs: the seed, the player list in join order, `X` (hole cards per player) and `Y` (maximum
 extra cards per player). Seat `i` is the `i`-th player to have joined, counting from 0.
 
+The bot itself never says `X`, `Y` or `Z` to a player: it calls `X` the **private cards**, `Y` the
+**extra cards** and `Z` the **scoop multiplier**, which plays no part in the deal at all. This
+document keeps the letters, because they are what the formulas below are written with.
+
 Nothing here depends on how the flip was configured. A command may leave `Y` out, in which case
 the bot fills in the maximum (`Y = 21`) before the deal, and `Z` out, in which case it fills in
 the number of players — but both are resolved when **Start** locks the player list, which is

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
+
 import pytest
 
 from esgbot.game.rules import (
@@ -24,11 +27,19 @@ from esgbot.game.rules import (
 )
 
 _FIELD_LIMITS: tuple[tuple[str, int, int], ...] = (
-    ("wager", WAGER_MIN, WAGER_MAX),
-    ("X", X_MIN, X_MAX),
-    ("Y", Y_MIN, Y_MAX),
-    ("Z", Z_MIN, Z_MAX),
+    ("Wager", WAGER_MIN, WAGER_MAX),
+    ("Private cards", X_MIN, X_MAX),
+    ("Extra cards", Y_MIN, Y_MAX),
+    ("Scoop multiplier", Z_MIN, Z_MAX),
 )
+
+# The Settings keyword (and parse_settings / FlipRequest keyword) each field is stored under.
+_KEYWORD: dict[str, str] = {
+    "Wager": "wager",
+    "Private cards": "x",
+    "Extra cards": "y",
+    "Scoop multiplier": "z",
+}
 
 
 @pytest.mark.parametrize(("field", "minimum", "maximum"), _FIELD_LIMITS)
@@ -81,22 +92,22 @@ _FULLWIDTH_FIFTY = chr(0xFF15) + chr(0xFF10)
 )
 def test_parse_whole_number_rejects_malformed_text(text: str) -> None:
     with pytest.raises(SettingsError):
-        parse_whole_number(text, field="wager", minimum=WAGER_MIN, maximum=WAGER_MAX)
+        parse_whole_number(text, field="Wager", minimum=WAGER_MIN, maximum=WAGER_MAX)
 
 
 def test_parse_whole_number_rejects_empty_text() -> None:
     with pytest.raises(SettingsError, match="missing"):
-        parse_whole_number("", field="wager", minimum=WAGER_MIN, maximum=WAGER_MAX)
+        parse_whole_number("", field="Wager", minimum=WAGER_MIN, maximum=WAGER_MAX)
 
 
 def test_parse_whole_number_error_field_matches() -> None:
     error = None
     try:
-        parse_whole_number("$50", field="wager", minimum=WAGER_MIN, maximum=WAGER_MAX)
+        parse_whole_number("$50", field="Wager", minimum=WAGER_MIN, maximum=WAGER_MAX)
     except SettingsError as caught:
         error = caught
     assert error is not None
-    assert error.field == "wager"
+    assert error.field == "Wager"
     assert error.message == str(error)
 
 
@@ -105,7 +116,7 @@ def test_settings_error_field_name_from_parse_settings(
     field: str, minimum: int, maximum: int
 ) -> None:
     valid = {"wager": "50", "x": "5", "y": "2", "z": "3"}
-    valid[field.lower()] = str(maximum + 1)
+    valid[_KEYWORD[field]] = str(maximum + 1)
     with pytest.raises(SettingsError) as excinfo:
         parse_settings(**valid)
     assert excinfo.value.field == field
@@ -123,7 +134,7 @@ def test_parse_flip_request_with_every_value_matches_parse_settings() -> None:
 
 @pytest.mark.parametrize("tokens", [[], ["50"], ["50", "5", "2", "3", "4"]])
 def test_parse_flip_request_rejects_wrong_count(tokens: list[str]) -> None:
-    with pytest.raises(SettingsError, match="wager and X"):
+    with pytest.raises(SettingsError, match="wager and the number of private cards"):
         parse_flip_request(tokens)
 
 
@@ -180,7 +191,7 @@ def test_a_third_value_is_y_never_z() -> None:
 
 def test_flip_fields_min_and_limits_are_unchanged() -> None:
     assert FLIP_FIELDS_MIN == 2
-    assert SETTING_FIELDS[:FLIP_FIELDS_MIN] == ("wager", "X")
+    assert SETTING_FIELDS[:FLIP_FIELDS_MIN] == ("Wager", "Private cards")
     assert (WAGER_MIN, WAGER_MAX) == (1, 1_000_000)
     assert (X_MIN, X_MAX) == (5, 21)
     assert (Y_MIN, Y_MAX) == (0, 21)
@@ -196,8 +207,8 @@ def test_wrong_count_message_names_the_fields_and_shows_both_examples(count: int
     with pytest.raises(SettingsError) as excinfo:
         parse_flip_request(["5"] * count)
     message = str(excinfo.value)
-    assert "wager" in message
-    assert "X" in message
+    assert "the wager and the number of private cards" in message
+    assert "the extra cards and the scoop multiplier" in message
     assert "50 5" in message
     assert "50 5 2 3" in message
     assert message.endswith(f"Got {count}.")
@@ -249,13 +260,13 @@ def test_values_on_the_limits_are_accepted_in_every_shape(length: int, position:
 def test_the_first_bad_field_is_the_one_reported() -> None:
     with pytest.raises(SettingsError) as excinfo:
         parse_flip_request(["abc", "99", "99", "0"])
-    assert excinfo.value.field == "wager"
+    assert excinfo.value.field == "Wager"
     with pytest.raises(SettingsError) as excinfo:
         parse_flip_request(["50", "99", "99", "0"])
-    assert excinfo.value.field == "X"
+    assert excinfo.value.field == "Private cards"
     with pytest.raises(SettingsError) as excinfo:
         parse_flip_request(["50", "5", "99", "0"])
-    assert excinfo.value.field == "Y"
+    assert excinfo.value.field == "Extra cards"
 
 
 @pytest.mark.parametrize("tokens", [["50", "five"], ["abc", "5"], ["50", "5", "-2"]])
@@ -267,13 +278,13 @@ def test_short_forms_still_reject_bad_values(tokens: list[str]) -> None:
 def test_a_bad_y_is_caught_when_z_is_absent() -> None:
     with pytest.raises(SettingsError) as excinfo:
         parse_flip_request(["50", "5", "22"])
-    assert excinfo.value.field == "Y"
+    assert excinfo.value.field == "Extra cards"
 
 
 def test_a_zero_z_is_rejected() -> None:
     with pytest.raises(SettingsError) as excinfo:
         parse_flip_request(["50", "5", "2", "0"])
-    assert excinfo.value.field == "Z"
+    assert excinfo.value.field == "Scoop multiplier"
 
 
 # --- FlipRequest validates what it is given ------------------------------------
@@ -327,7 +338,7 @@ def test_request_rejects_true_though_bool_is_an_int(field: str) -> None:
     assert excinfo.value.field == field
 
 
-@pytest.mark.parametrize("field", ["wager", "X"])
+@pytest.mark.parametrize("field", ["Wager", "Private cards"])
 def test_request_rejects_none_for_the_wager_and_x(field: str) -> None:
     with pytest.raises(SettingsError) as excinfo:
         _request_with(field, None)
@@ -453,7 +464,7 @@ def test_request_max_players_documented_values() -> None:
 
 
 def test_setting_fields_order() -> None:
-    assert SETTING_FIELDS == ("wager", "X", "Y", "Z")
+    assert SETTING_FIELDS == ("Wager", "Private cards", "Extra cards", "Scoop multiplier")
 
 
 def test_max_players_documented_values() -> None:
@@ -492,7 +503,6 @@ def test_settings_pot_rejects_non_positive_player_count() -> None:
 # --- Settings validates itself -------------------------------------------------
 
 _VALID: dict[str, int] = {"wager": 50, "x": 5, "y": 2, "z": 3}
-_KEYWORD: dict[str, str] = {"wager": "wager", "X": "x", "Y": "y", "Z": "z"}
 
 
 def _settings_with(field: str, value: object) -> Settings:
@@ -537,7 +547,8 @@ def test_settings_rejects_a_value_that_is_not_an_integer(field: str, value: obje
 
 @pytest.mark.parametrize("field", SETTING_FIELDS)
 def test_settings_rejects_true_though_bool_is_an_int(field: str) -> None:
-    # True == 1 is inside the limits of wager and Z, so only the type check stops it.
+    # True == 1 is inside the wager's and the scoop multiplier's limits, so only the type check
+    # stops it.
     with pytest.raises(SettingsError) as excinfo:
         _settings_with(field, True)
     assert excinfo.value.field == field
@@ -567,3 +578,68 @@ def test_parse_settings_builds_the_same_settings_at_the_boundaries(
         text = {"wager": "50", "x": "5", "y": "2", "z": "3"}
         text[_KEYWORD[field]] = str(value)
         assert parse_settings(**text) == _settings_with(field, value)
+
+
+# --- messages name settings in words, never by letter --------------------------
+
+_BARE_LETTER = re.compile(r"(?<![0-9A-Za-z])[XYZ](?![0-9A-Za-z])")
+
+
+def _error_messages(field: str, minimum: int, maximum: int) -> list[str]:
+    """Every kind of complaint rules.py can make about one field, as message text."""
+    keyword = _KEYWORD[field]
+    position = SETTING_FIELDS.index(field)
+    good = ["50", "5", "2", "3"]
+    messages = [
+        _raise_text(lambda: parse_whole_number("", field=field, minimum=minimum, maximum=maximum)),
+        _raise_text(
+            lambda: parse_whole_number("abc", field=field, minimum=minimum, maximum=maximum)
+        ),
+        _raise_text(
+            lambda: parse_whole_number(
+                str(maximum + 1), field=field, minimum=minimum, maximum=maximum
+            )
+        ),
+        _raise_text(lambda: _settings_with(field, maximum + 1)),
+        _raise_text(lambda: _settings_with(field, True)),
+        _raise_text(lambda: _request_with(field, maximum + 1)),
+        _raise_text(lambda: parse_settings(**{**_TEXT, keyword: str(maximum + 1)})),
+        _raise_text(lambda: parse_flip_request([*good[:position], "abc", *good[position + 1 :]])),
+    ]
+    return messages
+
+
+_TEXT = {"wager": "50", "x": "5", "y": "2", "z": "3"}
+
+
+def _raise_text(call: Callable[[], object]) -> str:
+    with pytest.raises(SettingsError) as excinfo:
+        call()
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize(("field", "minimum", "maximum"), _FIELD_LIMITS)
+def test_no_message_names_a_setting_by_its_letter(field: str, minimum: int, maximum: int) -> None:
+    for message in _error_messages(field, minimum, maximum):
+        assert field in message
+        assert _BARE_LETTER.search(message) is None, message
+
+
+@pytest.mark.parametrize("count", [0, 1, 5])
+def test_the_wrong_count_message_names_no_setting_by_its_letter(count: int) -> None:
+    message = _raise_text(lambda: parse_flip_request(["5"] * count))
+    assert _BARE_LETTER.search(message) is None, message
+
+
+def test_the_letter_pattern_finds_a_bare_letter_and_nothing_else() -> None:
+    for bare in ("X must be", "Set Y.", "(Z)", "x2 and Z"):
+        assert _BARE_LETTER.search(bare), bare
+    for clean in ("Extra cards", "XL", "5X", "Wager 5 Zoo"):
+        assert _BARE_LETTER.search(clean) is None, clean
+
+
+def test_setting_names_are_the_words_the_rest_of_the_bot_uses() -> None:
+    assert SETTING_FIELDS == ("Wager", "Private cards", "Extra cards", "Scoop multiplier")
+    for name in SETTING_FIELDS:
+        assert len(name) > 1
+        assert name[0].isupper()

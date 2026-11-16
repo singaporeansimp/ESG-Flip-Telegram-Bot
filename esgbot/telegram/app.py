@@ -57,7 +57,10 @@ left on the server, which is also all the bot needs under Telegram's default
 privacy mode."""
 
 COMMANDS: Final = (
-    BotCommand(command="flip", description="Start a flip: /flip <wager> <X> [Y] [Z]"),
+    BotCommand(
+        command="flip",
+        description="Start a flip: /flip <wager> <private cards> [extra cards] [scoop multiplier]",
+    ),
     BotCommand(command="again", description="Repeat this group's last flip, same settings"),
     BotCommand(command="leaderboard", description="Top players in this group by net winnings"),
     BotCommand(command="stats", description="Your stats, or /stats @name, or reply to someone"),
@@ -65,7 +68,11 @@ COMMANDS: Final = (
 )
 """The slash commands Telegram offers when someone types ``/`` in a chat with the
 bot. They are what the bot answers to, written down once, so the menu cannot
-promise a command the handlers do not have."""
+promise a command the handlers do not have.
+
+The settings are named here as they are named everywhere else the bot speaks:
+the menu is where somebody meets the command for the first time, and a menu that
+said ``<X> [Y] [Z]`` would be the one place they had to learn the letters."""
 
 
 async def register_commands(bot: Bot) -> None:

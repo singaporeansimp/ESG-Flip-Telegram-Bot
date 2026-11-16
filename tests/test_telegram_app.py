@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import socket
 import sqlite3
 import threading
@@ -281,8 +282,9 @@ def test_every_menu_entry_is_one_telegram_will_accept() -> None:
     assert names == ["flip", "again", "leaderboard", "stats", "verify"]
     assert len(names) == len(set(names))
     flip = next(command for command in app.COMMANDS if command.command == "flip")
-    assert "<wager> <X> [Y] [Z]" in flip.description
+    assert "/flip <wager> <private cards> [extra cards] [scoop multiplier]" in flip.description
     for command in app.COMMANDS:
+        assert not re.search(r"(?<![0-9A-Za-z])[XYZ](?![0-9A-Za-z])", command.description)
         assert command.command == command.command.lower()
         assert 1 <= len(command.command) <= 32
         assert 3 <= len(command.description) <= 256

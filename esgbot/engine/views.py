@@ -115,7 +115,7 @@ class Notice(StrEnum):
     """Leave pressed by somebody who is not on the list."""
 
     LOBBY_FULL = "lobby_full"
-    """Join pressed at the player cap for this flip's X."""
+    """Join pressed at the player cap, which this flip's private-card count sets."""
 
     NOT_THE_STARTER = "not_the_starter"
     """Start or Cancel pressed by anybody but the starter."""
@@ -199,7 +199,7 @@ class LobbyView:
 
     @property
     def full(self) -> bool:
-        """Whether the lobby is at the cap for this flip's X."""
+        """Whether the lobby is at the cap this flip's private-card count sets."""
         return len(self.players) >= self.request.max_players
 
 

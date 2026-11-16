@@ -40,7 +40,9 @@ from tests.telegram_helpers import (
 _OTHER_GROUP = -1002222222222
 _PAT = 12
 
-_ROW = re.compile(r"^\d+\. ")
+_MEDALS = ("🥇", "🥈", "🥉")
+_ROW = re.compile(r"^(?:🥇|🥈|🥉|\d+\.) ")
+_BARE_SETTING_LETTER = re.compile(r"(?<![0-9A-Za-z])[XYZ](?![0-9A-Za-z])")
 
 
 async def _record(world: BotHarness, lines: list[Line], *, seed: int, group_id: int = GROUP) -> int:
@@ -59,13 +61,29 @@ async def _ask(world: BotHarness, text: str, *, sender_id: int = STARTER) -> str
 
 
 def _rows(text: str) -> list[str]:
-    """The numbered rows of a leaderboard reply."""
+    """The rows of a leaderboard reply: a medal or a number, then the player."""
     return [line for line in text.splitlines() if _ROW.match(line)]
 
 
 def _ranking(text: str) -> list[str]:
     """The names on a leaderboard reply, best first."""
-    return [row.split(". ", 1)[1].split(" — ")[0] for row in _rows(text)]
+    return [_ROW.sub("", row, count=1).split(" — ")[0] for row in _rows(text)]
+
+
+def _marker(row: str) -> str:
+    """The medal or the ``N.`` that opens a leaderboard row."""
+    return row.split(" ", 1)[0]
+
+
+def _figures(text: str) -> dict[str, str]:
+    """The one-fact-per-line figures of a ``/stats`` reply, by label."""
+    labels = ("Net winnings", "Flips played", "Wins", "Scoops")
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        label, _, value = line.partition(": ")
+        if label in labels:
+            found[label] = value
+    return found
 
 
 def _reply_to(text: str, *, sender_id: int | None, name: str = "Pat") -> Message:
@@ -116,6 +134,7 @@ def test_leaderboard_ranks_by_net_then_wins_then_name_without_case_then_user_id(
         assert _ranking(text) == ["Top", "Many", "Few", "bravo", "bravo", "Charlie", "Loser"]
         ranked = await world.store.leaderboard(GROUP)
         assert [stats.user_id for stats in ranked] == [1, 2, 3, 5, 6, 4, 7]
+        assert [_marker(row) for row in _rows(text)] == ["🥇", "🥈", "🥉", "4.", "5.", "6.", "7."]
         await world.close()
 
     asyncio.run(scenario())
@@ -158,11 +177,21 @@ def test_a_chop_winner_who_netted_nothing_played_but_did_not_win() -> None:
         await _record(world, [Line(1, "Ann", 0), Line(2, "Bob", 0)], seed=1)
 
         only_chops = await _ask(world, "/stats", sender_id=1)
-        assert "$0 · 1 flip · 0 wins (0%) · 0 scoops" in only_chops
+        assert _figures(only_chops) == {
+            "Net winnings": "$0",
+            "Flips played": "1",
+            "Wins": "0 (0%)",
+            "Scoops": "0",
+        }
 
         await _record(world, [Line(1, "Ann", 100), Line(2, "Bob", -100)], seed=2)
         mixed = await _ask(world, "/stats", sender_id=1)
-        assert "+$100 · 2 flips · 1 win (50%) · 0 scoops" in mixed
+        assert _figures(mixed) == {
+            "Net winnings": "+$100",
+            "Flips played": "2",
+            "Wins": "1 (50%)",
+            "Scoops": "0",
+        }
         await world.close()
 
     asyncio.run(scenario())
@@ -199,6 +228,8 @@ def test_the_leaderboard_shows_the_twenty_best_players_and_drops_the_rest() -> N
         text = await _ask(world, "/leaderboard")
 
         assert _ranking(text) == [f"P{n:02d}" for n in range(22, 2, -1)]
+        assert len(_rows(text)) == 20
+        assert _marker(_rows(text)[-1]) == "20."
         assert "P02" not in text
         assert "P01" not in text
         await world.close()
@@ -238,9 +269,14 @@ def test_groups_never_mix_in_the_ranking_or_in_a_players_figures() -> None:
 
         assert _ranking(board) == ["Ann", "Bob"]
         assert "Eve" not in board
-        assert "+$100 · 1 flip · 1 win (100%)" in stats
-        assert "I have no player by that name" not in stats
-        assert "no player by that name in this group" in elsewhere
+        assert _figures(stats) == {
+            "Net winnings": "+$100",
+            "Flips played": "1",
+            "Wins": "1 (100%)",
+            "Scoops": "0",
+        }
+        assert "I have no player called" not in stats
+        assert "I have no player called @eve in this group" in elsewhere
         await world.close()
 
     asyncio.run(scenario())
@@ -293,7 +329,21 @@ def test_stats_with_no_argument_shows_the_askers_own_figures() -> None:
         text = await _ask(world, "/stats")
 
         assert "<b>Sam</b>" in text
-        assert "+$150 · 2 flips · 1 win (50%) · 0 scoops" in text
+        assert _figures(text) == {
+            "Net winnings": "+$150",
+            "Flips played": "2",
+            "Wins": "1 (50%)",
+            "Scoops": "0",
+        }
+        # One fact per line, under a title and a blank line.
+        assert text.splitlines()[0] == "📊 <b>Sam</b> — stats in this group"
+        assert text.splitlines()[1] == ""
+        assert text.splitlines()[2:] == [
+            "Net winnings: +$150",
+            "Flips played: 2",
+            "Wins: 1 (50%)",
+            "Scoops: 0",
+        ]
         assert "Pat" not in text
         await world.close()
 
@@ -338,7 +388,12 @@ def test_stats_by_name_finds_the_player_by_stored_username_however_it_is_typed(
         text = await _ask(world, command, sender_id=2)
 
         assert "<b>Ann</b>" in text
-        assert "+$70 · 1 flip · 1 win (100%) · 0 scoops" in text
+        assert _figures(text) == {
+            "Net winnings": "+$70",
+            "Flips played": "1",
+            "Wins": "1 (100%)",
+            "Scoops": "0",
+        }
         await world.close()
 
     asyncio.run(scenario())
@@ -351,8 +406,7 @@ def test_stats_by_an_unknown_name_says_there_is_no_such_player_in_this_group() -
 
         text = await _ask(world, "/stats @ghost")
 
-        assert "no player by that name in this group" in text
-        assert "ghost" in text
+        assert "I have no player called @ghost in this group." in text
         await world.close()
 
     asyncio.run(scenario())
@@ -370,9 +424,11 @@ def test_stats_by_name_returns_whoever_used_the_username_most_recently() -> None
         after_ann = await _ask(world, "/stats @shared")
 
         assert "<b>Bob</b>" in after_bob
-        assert "+$20 · 1 flip" in after_bob
+        assert _figures(after_bob)["Net winnings"] == "+$20"
+        assert _figures(after_bob)["Flips played"] == "1"
         assert "<b>Ann</b>" in after_ann
-        assert "+$40 · 2 flips" in after_ann
+        assert _figures(after_ann)["Net winnings"] == "+$40"
+        assert _figures(after_ann)["Flips played"] == "2"
         await world.close()
 
     asyncio.run(scenario())
@@ -387,7 +443,12 @@ def test_stats_as_a_reply_shows_that_persons_figures_even_with_no_username() -> 
 
         text = world.client.sends[-1].text
         assert "<b>Pat</b>" in text
-        assert "+$80 · 1 flip · 1 win (100%) · 0 scoops" in text
+        assert _figures(text) == {
+            "Net winnings": "+$80",
+            "Flips played": "1",
+            "Wins": "1 (100%)",
+            "Scoops": "0",
+        }
         await world.close()
 
     asyncio.run(scenario())
@@ -458,6 +519,82 @@ def test_stats_with_more_than_one_argument_gets_the_usage_line_and_no_lookup() -
 # ----------------------------------------------------------------- output rules
 
 
+def test_the_leaderboard_marks_at_most_three_medals_and_numbers_everyone_after() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        players = [Line(100 + n, f"P{n:02d}", 10 * n) for n in range(1, 13)]
+        for seed, start in enumerate(range(0, 12, 6), start=1):
+            await _record(world, players[start : start + 6], seed=seed)
+
+        rows = _rows(await _ask(world, "/leaderboard"))
+
+        markers = [_marker(row) for row in rows]
+        assert markers[:3] == list(_MEDALS)
+        assert markers[3:] == [f"{position}." for position in range(4, 13)]
+        assert sum(marker in _MEDALS for marker in markers) == 3
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_leaderboard_of_two_players_has_only_as_many_medals_as_players() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, [Line(1, "Ann", 50), Line(2, "Bob", -50)], seed=1)
+
+        rows = _rows(await _ask(world, "/leaderboard"))
+
+        assert [_marker(row) for row in rows] == ["🥇", "🥈"]
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_no_stats_reply_names_a_setting_by_its_letter() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(
+            world,
+            [Line(1, "Ann", 50, username="ann"), Line(2, "Bob", -50, username="bob")],
+            seed=1,
+        )
+        replies = [
+            await _ask(world, "/leaderboard", sender_id=1),
+            await _ask(world, "/stats", sender_id=1),
+            await _ask(world, "/stats @bob"),
+            await _ask(world, "/stats", sender_id=_PAT),
+            await _ask(world, "/stats @ghost"),
+            await _ask(world, "/stats @ann @bob"),
+        ]
+        await world.feed(message=_reply_to("/stats", sender_id=_PAT))
+        replies.append(world.client.sends[-1].text)
+        await world.feed(message=group_message("/stats", chat_type="private"))
+        replies.append(world.client.sends[-1].text)
+        world.store.stats_error = sqlite3.OperationalError("disk I/O error")
+        replies.append(await _ask(world, "/stats"))
+        empty = bot_harness()
+        replies.append(await _ask(empty, "/leaderboard"))
+        replies.extend(
+            (
+                render.NO_FINISHED_FLIPS,
+                render.NO_FLIPS_OF_YOUR_OWN,
+                render.render_no_stats_for("Pat"),
+                render.render_unknown_player("ghost"),
+                render.NO_STATS_IN_PRIVATE,
+                render.STATS_TROUBLE,
+                render.STATS_USAGE,
+            )
+        )
+
+        for text in replies:
+            assert text
+            assert not _BARE_SETTING_LETTER.search(text), text
+        await empty.close()
+        await world.close()
+
+    asyncio.run(scenario())
+
+
 def test_names_are_escaped_so_markup_in_a_display_name_never_becomes_a_tag() -> None:
     async def scenario() -> None:
         world = bot_harness()
@@ -507,6 +644,7 @@ def test_a_full_leaderboard_of_long_names_stays_inside_the_message_limit() -> No
 
         assert len(_rows(text)) == 20
         assert len(text) <= render.MESSAGE_LIMIT
+        assert _ranking(text)[0] == "22" + "x" * (render.NAME_LIMIT - 3) + "…"
         await world.close()
 
     asyncio.run(scenario())
@@ -522,8 +660,10 @@ def test_a_full_leaderboard_of_names_made_of_escapable_characters_stays_inside_t
 
         text = await _ask(world, "/leaderboard")
 
+        assert len(_rows(text)) == 20
         assert len(text) <= render.MESSAGE_LIMIT
         assert "<<" not in text
+        assert "&lt;&lt;" in text
         await world.close()
 
     asyncio.run(scenario())

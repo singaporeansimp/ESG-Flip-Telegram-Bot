@@ -1,15 +1,25 @@
 """Flip settings: the four values, their limits, and how text becomes them.
 
-A flip is configured with a wager and the three game settings:
+A flip is configured with a wager and the three game settings. Each one has a
+name people read and a letter the documents use, and :data:`SETTING_FIELDS` holds
+the names, because a message about a setting has to say which setting it is about
+in words a player already knows:
 
-===========  =================================================  ==============
-Setting      Meaning                                            Limits
-===========  =================================================  ==============
-``wager``    Whole dollars each player puts in                   1..1,000,000
-``x``        Private cards dealt to each player first            5..21
-``y``        Maximum extra private cards per player              0..21
-``z``        Scoop multiplier (``1`` means no scoop bonus)       1..100
-===========  =================================================  ==============
+=========  =================  ===========================================  ==============
+Field      Name people read   Meaning                                      Limits
+=========  =================  ===========================================  ==============
+``wager``  wager              Whole dollars each player puts in             1..1,000,000
+``x``      private cards      Dealt to each player before the boards        5..21
+``y``      extra cards        Dealt to each player after the boards, as
+                              many as fit up to this many                   0..21
+``z``      scoop multiplier   What taking all three boards pays, as a
+                              multiple of the wager (``1``: no bonus)       1..100
+=========  =================  ===========================================  ==============
+
+The letters are what ``docs/fairness-spec.md`` and the planning documents call
+them, and they stay the field names in code -- :class:`Settings` has ``x``, ``y``
+and ``z`` -- so the two can be read side by side. No message the bot sends uses
+them on their own.
 
 Values are plain whole numbers written in digits only. Signs, decimal points,
 thousands separators, whitespace and currency symbols are rejected rather than
@@ -18,15 +28,16 @@ guessed at, so ``$50``, ``5.0``, ``1,000`` and ``-3`` are all errors.
 Two boards take ten cards from the 52, which leaves 42 for the players, so at
 most ``floor(42 / x)`` players fit in one flip.
 
-**Only the wager and X have to be given.** ``/flip`` takes them in order, so a
-command may stop after X or after Y: :class:`FlipRequest` is what a command asks
-for, with a ``None`` standing for a value the bot fills in --
-:data:`Y_DEFAULT` for ``Y``, which the deal reads as "as many extra cards as the
-deck can give every seat", and the number of players for ``Z``, which is only known
-once the player list is locked. :meth:`FlipRequest.resolve` turns a request into
-:class:`Settings` at a table of a given size, and from there nothing downstream
-can tell a value that was typed from one that was filled in: a
-:class:`Settings` is always all four values, inside their limits.
+**Only the wager and the private-card count have to be given.** ``/flip`` takes
+the settings in order, so a command may stop after either of the first two:
+:class:`FlipRequest` is what a command asks for, with a ``None`` standing for a
+value the bot fills in -- :data:`Y_DEFAULT` for the extra cards, which the deal
+reads as "as many as the deck can give every seat", and the number of players for
+the scoop multiplier, which is only known once the player list is locked.
+:meth:`FlipRequest.resolve` turns a request into :class:`Settings` at a table of a
+given size, and from there nothing downstream can tell a value that was typed
+from one that was filled in: a :class:`Settings` is always all four values,
+inside their limits.
 """
 
 from __future__ import annotations
@@ -86,24 +97,33 @@ MIN_PLAYERS: Final = 2
 """A flip needs at least two players. The engine enforces this when Start is pressed."""
 
 Y_DEFAULT: Final = Y_MAX
-"""What ``Y`` means when a command leaves it out: the maximum.
+"""What the extra cards mean when a command leaves them out: the maximum.
 
 The deal never sends out a round of extra cards it cannot give every seat, so
 asking for 21 asks for as many as fit rather than for 21 of them. See
 :func:`esgbot.game.deal.extra_rounds_for`.
 """
 
-SETTING_FIELDS: Final = ("wager", "X", "Y", "Z")
-"""Field names used in error messages, in the order settings are given."""
+SETTING_FIELDS: Final = ("Wager", "Private cards", "Extra cards", "Scoop multiplier")
+"""What each setting is called, in the order a command gives them.
+
+These are the names the bot says out loud: they begin every complaint about a
+setting, so a player is told that "Private cards must be a whole number from 5 to
+21" rather than anything about an ``X``. They are capitalised because every
+message that uses one starts a sentence with it.
+"""
 
 FLIP_FIELDS_MIN: Final = 2
-"""Settings a ``/flip`` must give: the wager and ``X``. ``Y`` and ``Z`` may be left out."""
+"""Settings a ``/flip`` must give: the wager and the private-card count.
+
+The extra cards and the scoop multiplier may be left out, in that order.
+"""
 
 _LIMITS: Final[dict[str, tuple[int, int]]] = {
-    "wager": (WAGER_MIN, WAGER_MAX),
-    "X": (X_MIN, X_MAX),
-    "Y": (Y_MIN, Y_MAX),
-    "Z": (Z_MIN, Z_MAX),
+    "Wager": (WAGER_MIN, WAGER_MAX),
+    "Private cards": (X_MIN, X_MAX),
+    "Extra cards": (Y_MIN, Y_MAX),
+    "Scoop multiplier": (Z_MIN, Z_MAX),
 }
 
 _DIGITS: Final = frozenset("0123456789")
@@ -177,11 +197,12 @@ class Settings:
 class FlipRequest:
     """What a ``/flip`` asked for, which is not yet what it will play.
 
-    The wager and ``X`` are always given. ``y`` and ``z`` are ``None`` when the
-    command left them out for the bot to fill in, and that distinction is kept
-    rather than resolved on the spot for two reasons: ``Z`` *cannot* be resolved
-    until Start locks the player list, and ``/again`` repeats a flip as it was
-    typed, so a defaulted value is defaulted again for the new table.
+    The wager and the private-card count are always given. ``y`` and ``z`` are
+    ``None`` when the command left them out for the bot to fill in, and that
+    distinction is kept rather than resolved on the spot for two reasons: the
+    scoop multiplier *cannot* be resolved until Start locks the player list, and
+    ``/again`` repeats a flip as it was typed, so a defaulted value is defaulted
+    again for the new table.
 
     Every value that is given is checked against the same limits
     :class:`Settings` applies, so a request is as valid as it can be while two of
@@ -203,12 +224,13 @@ class FlipRequest:
     z: int | None = None
 
     def __post_init__(self) -> None:
-        _check_setting("wager", self.wager)
-        _check_setting("X", self.x)
+        wager, private, extra, scoop = SETTING_FIELDS
+        _check_setting(wager, self.wager)
+        _check_setting(private, self.x)
         if self.y is not None:
-            _check_setting("Y", self.y)
+            _check_setting(extra, self.y)
         if self.z is not None:
-            _check_setting("Z", self.z)
+            _check_setting(scoop, self.z)
 
     @classmethod
     def from_settings(
@@ -333,20 +355,21 @@ def parse_settings(*, wager: str, x: str, y: str, z: str) -> Settings:
     Raises:
         SettingsError: with a user-readable message naming the field at fault.
     """
-    values = {
-        field: _parse_field(field, text)
+    values = [
+        _parse_field(field, text)
         for field, text in zip(SETTING_FIELDS, (wager, x, y, z), strict=True)
-    }
-    return Settings(wager=values["wager"], x=values["X"], y=values["Y"], z=values["Z"])
+    ]
+    return Settings(wager=values[0], x=values[1], y=values[2], z=values[3])
 
 
 def parse_flip_request(tokens: Sequence[str]) -> FlipRequest:
-    """Read a ``/flip`` command's settings: the wager and X, then Y and Z if given.
+    """Read a ``/flip`` command's settings, in the order :data:`SETTING_FIELDS` names.
 
-    Two, three or four tokens, in the order wager, X, Y, Z. They are positional,
-    so ``Z`` can only be given after a ``Y``; what is left off the end is what
-    the bot fills in. Fields are checked in that order and the first failure
-    raises.
+    Two, three or four tokens: the wager and the private-card count, then the
+    extra cards and the scoop multiplier if they were given. They are positional,
+    so a scoop multiplier can only follow an extra-cards number; what is left off
+    the end is what the bot fills in. Fields are checked in that order and the
+    first failure raises.
 
     Raises:
         SettingsError: if there are fewer than :data:`FLIP_FIELDS_MIN` tokens or
@@ -354,8 +377,9 @@ def parse_flip_request(tokens: Sequence[str]) -> FlipRequest:
     """
     if not FLIP_FIELDS_MIN <= len(tokens) <= len(SETTING_FIELDS):
         raise SettingsError(
-            "Give the wager and X, then Y and Z if you want them. "
-            f"For example: 50 5, or 50 5 2 3. Got {len(tokens)}."
+            "Give at least the wager and the number of private cards, then the extra cards "
+            f"and the scoop multiplier if you want them. For example: 50 5, or 50 5 2 3. "
+            f"Got {len(tokens)}."
         )
     values = [
         _parse_field(field, text) for field, text in zip(SETTING_FIELDS, tokens, strict=False)

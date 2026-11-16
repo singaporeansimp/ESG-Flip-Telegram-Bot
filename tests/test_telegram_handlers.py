@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import sqlite3
 
 import pytest
@@ -141,23 +142,33 @@ def test_flip_carries_the_senders_name_and_username_onto_the_player() -> None:
 @pytest.mark.parametrize(
     ("command", "complaint"),
     [
-        pytest.param("/flip", "Give the wager and X", id="no-arguments"),
-        pytest.param("/flip 50", "Give the wager and X", id="wager-alone"),
-        pytest.param("/flip 50 5 2 3 1", "Give the wager and X", id="too-many"),
-        pytest.param("/flip abc 5 2 3", "wager must be", id="wager-not-digits"),
-        pytest.param("/flip 50 five 2 3", "X must be", id="x-not-digits"),
-        pytest.param("/flip $50 5 2 3", "wager must be", id="dollar-sign"),
-        pytest.param("/flip 50 5.0 2 3", "X must be", id="decimal-point"),
-        pytest.param("/flip 1,000 5 2 3", "wager must be", id="thousands-separator"),
-        pytest.param("/flip -50 5 2 3", "wager must be", id="negative-wager"),
-        pytest.param("/flip 50 5 -2 3", "Y must be", id="negative-y"),
-        pytest.param(f"/flip {rules.WAGER_MIN - 1} 5 2 3", "wager must be", id="wager-too-small"),
-        pytest.param(f"/flip {rules.WAGER_MAX + 1} 5 2 3", "wager must be", id="wager-too-big"),
-        pytest.param(f"/flip 50 {rules.X_MIN - 1} 2 3", "X must be", id="x-too-small"),
-        pytest.param(f"/flip 50 {rules.X_MAX + 1} 2 3", "X must be", id="x-too-big"),
-        pytest.param(f"/flip 50 5 {rules.Y_MAX + 1} 3", "Y must be", id="y-too-big"),
-        pytest.param(f"/flip 50 5 2 {rules.Z_MIN - 1}", "Z must be", id="z-too-small"),
-        pytest.param(f"/flip 50 5 2 {rules.Z_MAX + 1}", "Z must be", id="z-too-big"),
+        pytest.param(
+            "/flip", "Give at least the wager and the number of private cards", id="no-arguments"
+        ),
+        pytest.param(
+            "/flip 50", "Give at least the wager and the number of private cards", id="wager-alone"
+        ),
+        pytest.param(
+            "/flip 50 5 2 3 1",
+            "Give at least the wager and the number of private cards",
+            id="too-many",
+        ),
+        pytest.param("/flip abc 5 2 3", "Wager must be", id="wager-not-digits"),
+        pytest.param("/flip 50 five 2 3", "Private cards must be", id="x-not-digits"),
+        pytest.param("/flip $50 5 2 3", "Wager must be", id="dollar-sign"),
+        pytest.param("/flip 50 5.0 2 3", "Private cards must be", id="decimal-point"),
+        pytest.param("/flip 1,000 5 2 3", "Wager must be", id="thousands-separator"),
+        pytest.param("/flip -50 5 2 3", "Wager must be", id="negative-wager"),
+        pytest.param("/flip 50 5 -2 3", "Extra cards must be", id="negative-y"),
+        pytest.param(f"/flip {rules.WAGER_MIN - 1} 5 2 3", "Wager must be", id="wager-too-small"),
+        pytest.param(f"/flip {rules.WAGER_MAX + 1} 5 2 3", "Wager must be", id="wager-too-big"),
+        pytest.param(f"/flip 50 {rules.X_MIN - 1} 2 3", "Private cards must be", id="x-too-small"),
+        pytest.param(f"/flip 50 {rules.X_MAX + 1} 2 3", "Private cards must be", id="x-too-big"),
+        pytest.param(f"/flip 50 5 {rules.Y_MAX + 1} 3", "Extra cards must be", id="y-too-big"),
+        pytest.param(
+            f"/flip 50 5 2 {rules.Z_MIN - 1}", "Scoop multiplier must be", id="z-too-small"
+        ),
+        pytest.param(f"/flip 50 5 2 {rules.Z_MAX + 1}", "Scoop multiplier must be", id="z-too-big"),
     ],
 )
 def test_flip_with_bad_settings_names_the_problem_and_opens_nothing(
@@ -175,6 +186,58 @@ def test_flip_with_bad_settings_names_the_problem_and_opens_nothing(
         assert reply.markup is None
         assert world.registry.flips == ()
         assert world.store.active == {}
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_complaint_about_one_setting_carries_the_short_usage_and_about_the_count_the_legend() -> (
+    None
+):
+    async def scenario() -> None:
+        world = bot_harness()
+
+        await world.flip_command("/flip 50 99 2 3")
+        await world.flip_command("/flip 50")
+
+        one_setting, count = (call.text for call in world.client.sends)
+        assert one_setting.startswith("⚠️ Private cards must be")
+        assert render.USAGE_SHORT in one_setting
+        assert "What each number means" not in one_setting
+        assert count.startswith("⚠️ Give at least the wager")
+        assert render.USAGE in count
+        assert "What each number means" in count
+        assert render.USAGE_SHORT not in count
+        assert world.registry.flips == ()
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+_LETTER = re.compile(r"(?<![0-9A-Za-z])[XYZ](?![0-9A-Za-z])")
+
+
+def test_no_flip_or_again_reply_names_a_setting_by_its_letter() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        for bad in ("/flip", "/flip 50", "/flip 50 99 2 3", "/flip 50 5 99 3", "/flip 50 5 2 0"):
+            await world.flip_command(bad)
+        await world.feed(message=group_message("/again"))
+        await world.feed(message=group_message("/again 50 5"))
+        await world.feed(message=group_message("/again", chat_type="private"))
+        await _open(world)
+        await world.flip_command("/flip 10 6 1 2")
+        await world.feed(message=group_message("/again"))
+
+        texts = [call.text for call in world.client.sends]
+        assert len(texts) >= 9
+        for text in texts:
+            if "What each number means" in text:
+                continue
+            assert not _LETTER.search(text), text
+        # The legend is the one place the letters are allowed, so it must be there.
+        assert any("What each number means" in text for text in texts)
         await world.close()
 
     asyncio.run(scenario())
@@ -305,9 +368,9 @@ def test_a_flip_started_in_a_topic_posts_everything_into_that_topic() -> None:
 
         sends = world.client.sends
         texts = [call.text for call in sends]
-        assert any("New ESG flip" in text for text in texts)
-        assert any("Deck commitment" in text for text in texts)
-        assert any("result</b>" in text for text in texts)
+        assert any("New flip" in text for text in texts)
+        assert any("The deck is sealed" in text for text in texts)
+        assert any("🏁 <b>Flip" in text for text in texts)
         assert len(sends) >= 3
         assert {call.thread_id for call in sends} == {TOPIC}
         assert {call.chat_id for call in sends} == {GROUP}
@@ -444,7 +507,7 @@ def test_start_by_the_starter_deals() -> None:
 
         assert "Dealing now" in answer.text
         assert flip.phase is not FlipPhase.LOBBY
-        assert any("Deck commitment" in call.text for call in world.client.sends)
+        assert any("The deck is sealed" in call.text for call in world.client.sends)
         await world.close()
 
     asyncio.run(scenario())
@@ -513,7 +576,7 @@ def test_peek_from_somebody_who_is_not_playing_shows_no_cards() -> None:
         answer = await _press(world, flip, Press.PEEK, user_id=_STRANGER, name="Lou")
 
         assert "not in this flip" in answer.text
-        assert "Seat" not in answer.text
+        assert "seat" not in answer.text.lower()
         assert not answer.alert
         await world.close()
 
@@ -567,7 +630,7 @@ def test_peek_is_a_private_alert_holding_only_that_players_cards(
 
         for answer in (early, late):
             assert answer.alert
-            assert "Seat 1" in answer.text
+            assert "seat 1" in answer.text
             assert {str(card) for card in mine.hole} <= _tokens(answer.text)
             assert not {str(card) for card in theirs.cards} & _tokens(answer.text)
         assert {str(card) for card in mine.extra} <= _tokens(late.text)
@@ -628,7 +691,7 @@ def test_a_peek_pressed_before_the_commitment_is_out_shows_no_cards(
         assert flip.phase is FlipPhase.DEALING
         assert len(client.sends) == 1
         assert not answer.alert
-        assert "Seat" not in answer.text
+        assert "seat" not in answer.text.lower()
         for hand in deal.hands:
             assert not {str(card) for card in hand.cards} & _tokens(answer.text)
         assert answer.text == render.render_notice(Notice.EXPIRED)
@@ -655,7 +718,7 @@ def test_the_other_player_peeks_at_their_own_cards_instead(
 
         answer = await _press(world, flip, Press.PEEK, user_id=_JOINER, name="Pat")
 
-        assert "Seat 2" in answer.text
+        assert "seat 2" in answer.text
         assert {str(card) for card in theirs.hole} <= _tokens(answer.text)
         assert not {str(card) for card in mine.cards} & _tokens(answer.text)
         await world.close()
@@ -997,6 +1060,10 @@ def test_flip_with_only_the_wager_and_x_leaves_y_and_z_to_the_bot() -> None:
         assert "$50 a head" in lobby.text
         assert "Y 21" not in lobby.text
         assert "Z 1" not in lobby.text
+        assert "as many extra cards as fit" in lobby.text
+        assert "scoop pays the wager times the number of players" in lobby.text
+        assert "21" not in lobby.text
+        assert "3x" not in lobby.text
         await world.close()
 
     asyncio.run(scenario())
@@ -1032,9 +1099,9 @@ def test_flip_with_every_setting_defaults_nothing() -> None:
 @pytest.mark.parametrize(
     ("command", "complaint"),
     [
-        pytest.param("/flip 50 abc", "X must be", id="bad-x-without-y"),
-        pytest.param(f"/flip 50 5 {rules.Y_MAX + 1}", "Y must be", id="bad-y-without-z"),
-        pytest.param("/flip 50 5 2 0", "Z must be", id="bad-z"),
+        pytest.param("/flip 50 abc", "Private cards must be", id="bad-x-without-y"),
+        pytest.param(f"/flip 50 5 {rules.Y_MAX + 1}", "Extra cards must be", id="bad-y-without-z"),
+        pytest.param("/flip 50 5 2 0", "Scoop multiplier must be", id="bad-z"),
     ],
 )
 def test_flip_with_a_bad_short_form_names_the_problem_and_opens_nothing(

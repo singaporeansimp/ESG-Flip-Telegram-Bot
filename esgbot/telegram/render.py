@@ -11,6 +11,29 @@ rows or a :class:`~esgbot.verify.Verification` in, a finished message out. They
 are sent straight to the group rather than through :func:`render`, so each one
 fits itself.
 
+**Nobody has to know what X, Y and Z are.** The documents call the settings by
+letter; the bot calls them by name -- ``private cards``, ``extra cards`` and the
+``scoop multiplier`` -- in every message, usage line and complaint, and
+:data:`~esgbot.game.rules.SETTING_FIELDS` is where those names live. The letters
+appear in exactly one place a player can see, the legend in :data:`USAGE`, so
+somebody reading the published spec can line the two up.
+
+**Every message is laid out the same way.** Title first, saying what has
+happened, with the money on the same line or just under it; then the sections a
+flip has, in the order they matter to somebody holding a phone in a busy group:
+
+===========================  ==================================================
+:func:`render_lobby`         what it is · who is in · what the settings are
+:func:`render_table`         what is out · the boards · the players · how to peek
+:func:`render_showdown`      the same, plus the hands, each board, the points
+:func:`render_result`        who won · who owes whom · players · boards · proof
+:func:`render_void`          that it is void · why · the seed to check it with
+===========================  ==================================================
+
+Inside a section it is one fact per line, lists are numbered by seat, and the
+provenance -- the commitment, the seed, the ``/verify`` line -- comes last,
+because it is what somebody checks afterwards rather than what they read now.
+
 **HTML, and the two limits.** Messages go out in Telegram's HTML parse mode, so
 every name a person chose for themselves is escaped with :func:`escape` and
 clipped to :data:`NAME_LIMIT` characters. That clip is what keeps a message
@@ -20,7 +43,12 @@ is twenty rows of them. :func:`render` still checks, and shortens on a line
 boundary if it ever has to.
 
 Every tag opened on a line is closed on the same line. That is what makes
-shortening at a newline safe, and it is worth keeping.
+shortening at a newline safe, and it is worth keeping. Only ``<b>`` and
+``<code>`` are used: bold for titles and section headings, code for the things
+somebody copies -- a commitment, a seed, a command -- and for nothing else, so
+the formatting means something wherever it appears. The handful of emoji mark
+status and nothing else, and no message leans on colour, so it reads the same in
+either theme.
 
 **The pop-up a Peek raises** is the one thing that is not HTML:
 :func:`render_peek` writes plain text, because a callback answer is plain text,
@@ -94,6 +122,7 @@ __all__ = [
     "STATS_USAGE",
     "STORAGE_TROUBLE",
     "USAGE",
+    "USAGE_SHORT",
     "VERIFY_USAGE",
     "escape",
     "render",
@@ -130,18 +159,18 @@ _EXTRA_MARK: Final = "*"
 """What marks a card dealt after the boards, in the group and in the pop-up."""
 
 _AS_MANY_AS_FIT: Final = "as many extra cards as fit"
-"""What a ``Y`` the bot filled in asks for, in words.
+"""What an extra-cards setting the bot filled in asks for, in words.
 
 :data:`~esgbot.game.rules.Y_DEFAULT` is 21, but the deal only sends out a round
 of extra cards it can give every seat, so the figure would promise cards the
-deck does not have. The settings line says this instead of a number.
+deck does not have. Every settings line says this instead of a number.
 """
 
-_Y_AS_FITS: Final = "Y as many as fit"
-"""The same, in the space a settings line has for it."""
+_SCOOP_PER_PLAYER: Final = "scoop pays the wager times the number of players"
+"""A scoop multiplier left out of the command, while the player list can still change."""
 
-_Z_PER_PLAYER: Final = "Z number of players"
-"""A ``Z`` left out of the command, while the player list can still change."""
+_EXTRA_NOTE: Final = f"{_EXTRA_MARK} dealt after the boards"
+"""What the mark on a card means, said once under the hands that carry it."""
 
 _TO_COME: Final = "— to come —"
 _SHORTENED: Final = "\n…"
@@ -153,25 +182,19 @@ _BOARD_NAMES: Final[dict[Board, str]] = {
     Board.HAND_STRENGTH: "Hand strength",
 }
 
-_RESULT_BOARD_NAMES: Final[dict[Board, str]] = {
-    Board.BOARD1: "Board 1",
-    Board.BOARD2: "Board 2",
-    Board.HAND_STRENGTH: "Hands",
-}
-
 _NOTICES: Final[dict[Notice, str]] = {
-    Notice.JOINED: "You are in.",
+    Notice.JOINED: "You are in. You will get your cards when the round starts.",
     Notice.LEFT: "You have left the lobby.",
     Notice.STARTED: "Dealing now.",
     Notice.CANCELLED: "Flip cancelled. Nothing was recorded.",
     Notice.ALREADY_JOINED: "You are already in this flip.",
     Notice.NOT_IN_LOBBY: "You are not in this lobby.",
-    Notice.LOBBY_FULL: "This lobby is full.",
+    Notice.LOBBY_FULL: "This lobby is full. Nobody else fits at this many private cards.",
     Notice.NOT_THE_STARTER: "Only whoever opened the flip can do that.",
     Notice.NEED_MORE_PLAYERS: f"A flip needs at least {MIN_PLAYERS} players.",
     Notice.ALREADY_STARTED: "The round has already started.",
     Notice.NOT_A_PLAYER: "You are not in this flip, so there are no cards to show you.",
-    Notice.EXPIRED: "This flip has expired.",
+    Notice.EXPIRED: "This flip has expired, so its buttons do nothing now.",
 }
 
 _VERIFY_PARTS: Final[dict[VerifyPart, str]] = {
@@ -191,60 +214,91 @@ _VOID_REASONS: Final[dict[VoidReason, str]] = {
     VoidReason.SEND_FAILED: "The bot could not post to this group.",
 }
 
+_NOTHING_RECORDED: Final = "Nothing was recorded and nobody owes anything."
+"""What every ending but a finished flip says, in the same words every time."""
+
 USAGE: Final = (
-    "Usage: <code>/flip &lt;wager&gt; &lt;X&gt; [&lt;Y&gt; [&lt;Z&gt;]]</code> — "
-    "for example <code>/flip 50 5 2 3</code>, or <code>/flip 50 5</code>.\n"
-    f"Wager {WAGER_MIN:,} to {WAGER_MAX:,} · X {X_MIN} to {X_MAX} · "
-    f"Y {Y_MIN} to {Y_MAX} · Z {Z_MIN} to {Z_MAX}, all plain whole numbers.\n"
-    f"Leave Y out for {_AS_MANY_AS_FIT}, and Z out for the number of players. "
-    "They go in that order, so Z needs a Y in front of it."
+    "<b>Start a flip</b>\n"
+    "<code>/flip &lt;wager&gt; &lt;private cards&gt; [extra cards] [scoop multiplier]</code>\n"
+    "For example <code>/flip 50 5 2 3</code> — $50 a head, 5 private cards each, "
+    "up to 2 extra cards each, a scoop pays 3x the wager.\n"
+    "\n"
+    "<b>What each number means</b>\n"
+    f"wager — dollars each player puts in · {WAGER_MIN:,} to {WAGER_MAX:,}\n"
+    f"private cards (X) — dealt to each player before the boards · {X_MIN} to {X_MAX}\n"
+    f"extra cards (Y) — dealt after the boards, as many as fit · {Y_MIN} to {Y_MAX}\n"
+    "scoop multiplier (Z) — what taking all three boards pays, as a multiple of the "
+    f"wager · {Z_MIN} to {Z_MAX}, where 1x is no bonus\n"
+    "\n"
+    "The last two are optional: <code>/flip 50 5</code> deals as many extra cards as fit and "
+    "makes the scoop multiplier the number of players. They go in that order, so a scoop "
+    "multiplier needs an extra-cards number in front of it. All of them are plain whole numbers."
 )
-"""How to write the command, shown with every complaint about its settings."""
+"""How to write the command, and what each number is for.
+
+The one place a player sees the letters, so that somebody holding
+``docs/fairness-spec.md`` can line its ``X``, ``Y`` and ``Z`` up with the names
+the rest of the bot uses. It answers a ``/flip`` that gave the wrong number of
+settings -- somebody who does not know the shape of the command -- while a
+complaint about one setting gets :data:`USAGE_SHORT`, because the complaint has
+already said which setting it is about and what it allows.
+"""
+
+USAGE_SHORT: Final = (
+    "<code>/flip &lt;wager&gt; &lt;private cards&gt; [extra cards] [scoop multiplier]</code>\n"
+    "For example <code>/flip 50 5 2 3</code>, or <code>/flip 50 5</code>.\n"
+    "Send <code>/flip</code> on its own for what each number means."
+)
+"""The command's shape and an example, for a complaint about one setting."""
 
 NO_FLIP_IN_PRIVATE: Final = (
-    "ESG flips are played in a group. Add me to a group chat and run <code>/flip</code> there."
+    "ESG flips are played in a group.\nAdd me to a group chat and run <code>/flip</code> there."
 )
 
 AGAIN_USAGE: Final = (
-    "Usage: <code>/again</code> on its own — it repeats this group's last flip with the "
-    "same settings. To play different ones, give them to <code>/flip</code>."
+    "<b>/again</b> takes no numbers.\n"
+    "It repeats this group's last flip, written the same way: a setting that was left out "
+    "is left out again.\n"
+    "To play different settings, give them to <code>/flip</code>."
 )
 """Shown when ``/again`` is given settings, which it has no use for."""
 
-
 STORAGE_TROUBLE: Final = (
-    "I could not open the flip: the database is not available right now. Try again in a moment."
+    "I could not open the flip: the database is not available right now.\nTry again in a moment."
 )
 
 _PLAY_ONE: Final = "Run <code>/flip 50 5 2 3</code> to play one."
 """How every empty stats answer ends, so there is always something to do next."""
 
 NO_STATS_IN_PRIVATE: Final = (
-    "Flips and their stats belong to a group. Add me to a group chat and ask there."
+    "Flips and their stats belong to a group.\nAdd me to a group chat and ask there."
 )
 
 STATS_TROUBLE: Final = (
-    "I could not read that: the database is not available right now. Try again in a moment."
+    "I could not read that: the database is not available right now.\nTry again in a moment."
 )
 
 STATS_USAGE: Final = (
-    "Usage: <code>/stats</code> for your own figures, <code>/stats @name</code> for somebody "
-    "else's, or <code>/stats</code> as a reply to their message."
+    "<b>Stats in this group</b>\n"
+    "<code>/stats</code> — your own figures\n"
+    "<code>/stats @name</code> — somebody else's\n"
+    "<code>/stats</code> as a reply to their message — the same, for somebody with no username"
 )
 """How to ask for somebody's stats, shown when the command cannot be read."""
 
 VERIFY_USAGE: Final = (
-    "Usage: <code>/verify &lt;flip number&gt;</code> — for example <code>/verify 42</code>. "
+    "<b>Check a finished flip</b>\n"
+    "<code>/verify &lt;flip number&gt;</code> — for example <code>/verify 42</code>.\n"
     "The number is in the flip's result message."
 )
 """How to write the command, shown when the flip number cannot be read."""
 
-NO_FINISHED_FLIPS: Final = f"No flips have finished in this group yet. {_PLAY_ONE}"
+NO_FINISHED_FLIPS: Final = f"No flips have finished in this group yet.\n{_PLAY_ONE}"
 
-NO_FLIPS_OF_YOUR_OWN: Final = f"You have not finished a flip in this group yet. {_PLAY_ONE}"
+NO_FLIPS_OF_YOUR_OWN: Final = f"You have not finished a flip in this group yet.\n{_PLAY_ONE}"
 
 NO_FLIP_TO_REPEAT: Final = (
-    f"No flips have finished in this group yet, so there is nothing to repeat. {_PLAY_ONE}"
+    f"No flips have finished in this group yet, so there is nothing to repeat.\n{_PLAY_ONE}"
 )
 """``/again`` in a group with no history. A flip that was cancelled or voided was
 never recorded, so it is not a flip this group has played."""
@@ -317,6 +371,11 @@ def _amount(dollars: int) -> str:
     return f"${dollars:,}"
 
 
+def _a_head(wager: int) -> str:
+    """The wager, as the group reads it on every message: ``$50 a head``."""
+    return f"{_amount(wager)} a head"
+
+
 def _net(dollars: int) -> str:
     """A net result, with its sign where there is one: ``+$200``, ``-$50``, ``$0``."""
     if dollars > 0:
@@ -333,38 +392,74 @@ def _points(points: Fraction) -> str:
     return f"{points.numerator}/{points.denominator}"
 
 
-def _settings_line(settings: Settings, *, y_defaulted: bool = False) -> str:
-    """``$50 a head · X 5 · Y 2 · Z 3``, for a flip whose settings are settled.
+def _points_with_unit(points: Fraction) -> str:
+    """``2 points``, ``1 point``, ``1/2 points``: a total with its unit."""
+    return f"{_points(points)} {'point' if points == 1 else 'points'}"
 
-    A ``Y`` the bot filled in is said in words rather than as the 21 it is, for
-    the reason :data:`_AS_MANY_AS_FIT` gives. ``Z`` is a figure here however it
-    was arrived at: Start has fixed the player list, so the number is exact.
+
+# -------------------------------------------------------- the settings in words
+
+
+def _private_cards(x: int) -> str:
+    """``5 private cards each``: what every player is dealt before the boards."""
+    return f"{x} private cards each"
+
+
+def _extra_cards(y: int | None) -> str:
+    """The extra-cards setting in words. ``None`` is one the bot filled in.
+
+    A number is a ceiling rather than a promise -- the deal only sends out a
+    round it can give every seat -- so it is always "up to".
+    """
+    if y is None:
+        return _AS_MANY_AS_FIT
+    if y == 0:
+        return "no extra cards"
+    return f"up to {_count(y, 'extra card')} each"
+
+
+def _scoop(z: int | None) -> str:
+    """The scoop multiplier in words. ``None`` is one the bot has yet to fill in.
+
+    A multiplier of one pays what an ordinary win pays, which is worth saying:
+    it is the setting doing nothing rather than the setting being missing.
+    """
+    if z is None:
+        return _SCOOP_PER_PLAYER
+    if z == 1:
+        return "scoop pays the wager, no bonus"
+    return f"scoop pays {z}x the wager"
+
+
+def _settings_strip(settings: Settings, *, y_defaulted: bool = False) -> str:
+    """The three game settings of a flip whose settings are settled, in words.
+
+    ``5 private cards each · up to 2 extra cards each · scoop pays 3x the wager``.
+    An extra-cards setting the bot filled in is said in words rather than as the
+    21 it is, for
+    the reason :data:`_AS_MANY_AS_FIT` gives; the scoop multiplier is a figure
+    here however it was arrived at, because Start has fixed the player list.
+
+    The wager is not in it: every message that shows this shows the money in its
+    own first lines, where somebody looks for it.
     """
     return " · ".join(
         (
-            f"{_amount(settings.wager)} a head",
-            f"X {settings.x}",
-            _Y_AS_FITS if y_defaulted else f"Y {settings.y}",
-            f"Z {settings.z}",
+            _private_cards(settings.x),
+            _extra_cards(None if y_defaulted else settings.y),
+            _scoop(settings.z),
         )
     )
 
 
-def _request_line(request: FlipRequest) -> str:
-    """The same line for a flip that has not started: what was asked for.
+def _request_strip(request: FlipRequest) -> str:
+    """The same three settings for a flip that has not started: what was asked for.
 
     Nothing is settled in a lobby, so a value the command left out is named
-    rather than guessed at -- above all ``Z``, which is the number of players and
-    would change with the next Join.
+    rather than guessed at -- above all the scoop multiplier, which is the number
+    of players and would change with the next Join.
     """
-    return " · ".join(
-        (
-            f"{_amount(request.wager)} a head",
-            f"X {request.x}",
-            _Y_AS_FITS if request.y is None else f"Y {request.y}",
-            _Z_PER_PLAYER if request.z is None else f"Z {request.z}",
-        )
-    )
+    return " · ".join((_private_cards(request.x), _extra_cards(request.y), _scoop(request.z)))
 
 
 def _clip(text: str, limit: int) -> str:
@@ -391,40 +486,50 @@ def _fit(text: str) -> str:
     return keep[:cut] + _SHORTENED
 
 
+def _block(*sections: Sequence[str]) -> str:
+    """Join sections with a blank line between them, dropping the empty ones.
+
+    Every message is a handful of these, which is what keeps the blank lines
+    even: a section that has nothing to say leaves no gap behind it.
+    """
+    return "\n\n".join("\n".join(lines) for lines in sections if lines)
+
+
 # ----------------------------------------------------------------------- lobby
 
 
 def render_lobby(view: LobbyView) -> str:
-    """The lobby message: the settings asked for, who is in, and what became of it."""
+    """The lobby message: what the flip is, who is in, and what became of it."""
     cap = view.request.max_players
-    lines = [_lobby_heading(view.status), _request_line(view.request)]
-    if view.status is LobbyStatus.OPEN:
-        lines.append(f"Up to {cap} players.")
-    lines.append("")
-    lines.append(f"<b>Players {view.player_count}/{cap}</b>")
-    if view.players:
-        lines += [f"{index}. {_name(player)}" for index, player in enumerate(view.players, start=1)]
-    else:
-        lines.append("Nobody yet.")
-    lines.append("")
-    lines.append(_lobby_footer(view))
-    return "\n".join(lines)
+    roster = (
+        [f"{index}. {_name(player)}" for index, player in enumerate(view.players, start=1)]
+        if view.players
+        else ["Nobody yet."]
+    )
+    return _block(
+        [_lobby_title(view), _request_strip(view.request)],
+        [f"<b>Players {view.player_count}/{cap}</b>", *roster],
+        [_lobby_footer(view)],
+    )
 
 
-def _lobby_heading(status: LobbyStatus) -> str:
-    match status:
+def _lobby_title(view: LobbyView) -> str:
+    """What this lobby is, and the money, on the line a notification shows."""
+    wager = _a_head(view.request.wager)
+    match view.status:
         case LobbyStatus.OPEN:
-            return "🎲 <b>New ESG flip</b>"
+            return f"🎲 <b>New flip</b> — {wager}"
         case LobbyStatus.CANCELLED:
-            return "❌ <b>Flip cancelled</b>"
+            return f"❌ <b>Flip cancelled</b> — {wager}"
         case LobbyStatus.TIMED_OUT:
-            return "⌛ <b>Lobby timed out</b>"
+            return f"⌛ <b>Lobby timed out</b> — {wager}"
         case LobbyStatus.VOIDED:
-            return "⚠️ <b>Flip voided</b>"
-    assert_never(status)
+            return f"⚠️ <b>Flip voided</b> — {wager}"
+    assert_never(view.status)
 
 
 def _lobby_footer(view: LobbyView) -> str:
+    """The line that says what happens next, or what happened instead."""
     starter = _name(view.starter)
     match view.status:
         case LobbyStatus.OPEN:
@@ -437,11 +542,13 @@ def _lobby_footer(view: LobbyView) -> str:
                 )
             return f"Opened by {starter}, who presses Start when everyone is in."
         case LobbyStatus.CANCELLED:
-            return f"{starter} cancelled it. Nothing was recorded."
+            return f"{starter} cancelled it. {_NOTHING_RECORDED}"
         case LobbyStatus.TIMED_OUT:
-            return "Nobody joined or left for long enough that it closed itself. Nothing recorded."
+            return (
+                f"Nobody joined or left for long enough that it closed itself. {_NOTHING_RECORDED}"
+            )
         case LobbyStatus.VOIDED:
-            return "Nothing was recorded and nobody owes anything."
+            return _NOTHING_RECORDED
     assert_never(view.status)
 
 
@@ -450,11 +557,13 @@ def _lobby_footer(view: LobbyView) -> str:
 
 def render_commitment(view: CommitmentView) -> str:
     """The deck commitment: its own message, posted before any card is shown."""
-    return (
-        "🔒 <b>Deck commitment</b>\n"
-        f"<code>{view.commitment}</code>\n"
-        "The deck was fixed before a single card was dealt. The seed comes out with the "
-        "result, so anyone can check it."
+    return _block(
+        ["🔒 <b>The deck is sealed</b>", "This is a fingerprint of the shuffled deck."],
+        [f"<code>{view.commitment}</code>"],
+        [
+            "It was taken before a single card was dealt. The seed behind it comes out with "
+            "the result, so anyone can check that the deck never changed."
+        ],
     )
 
 
@@ -463,21 +572,41 @@ def render_commitment(view: CommitmentView) -> str:
 
 def render_table(view: TableView) -> str:
     """The table message, through the deal: boards, card counts and the peek rule."""
-    lines = [
-        f"🃏 <b>ESG flip</b> — {_settings_line(view.settings, y_defaulted=view.y_defaulted)}",
-        f"Pot {_amount(view.settings.pot(view.player_count))} · "
-        f"button {_name(view.seats[view.button_seat].player)}",
-        f"Commitment <code>{view.commitment}</code>",
-        "",
-        _board_line(1, view.board1),
-        _board_line(2, view.board2),
-        "",
-        "<b>Players</b>",
-    ]
-    lines += [_seat_line(seat) for seat in view.seats]
-    lines.append("")
-    lines += _table_footer(view)
-    return "\n".join(lines)
+    return _block(
+        [
+            _table_title(view),
+            _table_money(view),
+            _settings_strip(view.settings, y_defaulted=view.y_defaulted),
+        ],
+        [_board_line(1, view.board1), _board_line(2, view.board2)],
+        ["<b>Players</b>", *(_seat_line(seat) for seat in view.seats)],
+        _table_footer(view),
+        [f"Deck commitment <code>{view.commitment}</code>"],
+    )
+
+
+def _table_title(view: TableView) -> str:
+    """What has just happened, which is what somebody glancing at it wants."""
+    if view.voided:
+        return "⚠️ <b>Flip voided</b>"
+    match view.stage:
+        case TableStage.HOLE_CARDS:
+            return "🃏 <b>Private cards are out</b>"
+        case TableStage.BOARD1:
+            return "🃏 <b>Board 1 is out</b>"
+        case TableStage.BOARD2:
+            return "🃏 <b>Both boards are out</b>"
+        case TableStage.PEEKING:
+            return "🃏 <b>Every card is out</b>"
+    assert_never(view.stage)
+
+
+def _table_money(view: TableView) -> str:
+    """The pot, the wager and who has the button, in one line."""
+    return (
+        f"{_a_head(view.settings.wager)} · pot {_amount(view.settings.pot(view.player_count))} · "
+        f"button {_name(view.seats[view.button_seat].player)}"
+    )
 
 
 def _board_line(number: int, cards: Sequence[Card]) -> str:
@@ -485,33 +614,34 @@ def _board_line(number: int, cards: Sequence[Card]) -> str:
 
 
 def _seat_line(seat: SeatView) -> str:
-    cards = "card" if seat.card_count == 1 else "cards"
-    return f"{seat.seat + 1}. {_name(seat.player)} — {seat.card_count} {cards}"
+    return f"{seat.seat + 1}. {_name(seat.player)} — {_count(seat.card_count, 'card')}"
 
 
 def _table_footer(view: TableView) -> list[str]:
+    """What to do now, or what became of the flip."""
     if view.voided:
-        return ["⚠️ This flip was voided. Nothing was recorded and nobody owes anything."]
+        return [_NOTHING_RECORDED, "The cards above are the deal as far as it got."]
     match view.stage:
-        case TableStage.HOLE_CARDS:
-            return ["Hole cards are out. Press Peek to see yours."]
-        case TableStage.BOARD1 | TableStage.BOARD2:
-            return ["Press Peek to see your cards."]
+        case TableStage.HOLE_CARDS | TableStage.BOARD1 | TableStage.BOARD2:
+            return ["Press Peek to see your own cards."]
         case TableStage.PEEKING:
-            return [_extra_line(view), _showdown_rule(), _peeked_line(view)]
+            return [_extra_line(view), _peeked_line(view), _showdown_rule()]
     assert_never(view.stage)
 
 
 def _extra_line(view: TableView) -> str:
+    """Whether the extra cards went out, and why not when they did not."""
     if view.extra_count == 0:
-        # Two different reasons for no extra cards, and the group can tell them
-        # apart from the settings line anyway: Y of zero asked for none, and
-        # anything else means the deck ran out before a full round could go out.
+        # Two different reasons for no extra cards: a setting of zero asked for
+        # none, and anything else means the deck ran out before a full round
+        # could go out. The settings line above says which, but not plainly.
         if view.settings.y == 0:
             return "No extra cards: this flip asked for none."
         return "No extra cards: the deck was too short to give everyone one."
-    each = "card" if view.extra_count == 1 else "cards"
-    return f"Extra cards dealt: {view.extra_count} {each} each. Peek again to see them."
+    return (
+        f"Extra cards: {view.extra_count} each, so everybody holds "
+        f"{view.settings.x + view.extra_count}. Press Peek again to see them."
+    )
 
 
 def _showdown_rule() -> str:
@@ -523,7 +653,9 @@ def _showdown_rule() -> str:
 
 
 def _peeked_line(view: TableView) -> str:
-    return f"Peeked: {view.peeked} of {view.player_count}."
+    """How many players have looked at their final hand."""
+    verb = "has" if view.peeked == 1 else "have"
+    return f"👀 {view.peeked} of {view.player_count} {verb} peeked."
 
 
 # -------------------------------------------------------------------- showdown
@@ -531,30 +663,44 @@ def _peeked_line(view: TableView) -> str:
 
 def render_showdown(view: ShowdownView) -> str:
     """The table at the showdown, showing everything up to ``view.step``."""
-    lines = [
-        f"🃏 <b>Showdown</b> — {_settings_line(view.settings, y_defaulted=view.y_defaulted)}",
-        f"Pot {_amount(view.settings.pot(view.player_count))} · "
-        f"button {_name(view.hands[view.button_seat].player)}",
-        f"Commitment <code>{view.commitment}</code>",
-        "",
-    ]
-    lines += _board_lines(view.boards)
-    lines.append("")
-    lines.append("<b>Hands</b>")
-    lines += [_showdown_hand(hand) for hand in view.hands]
+    hands = ["<b>Hands</b>", *(_showdown_hand(hand) for hand in view.hands)]
     if any(hand.extra for hand in view.hands):
-        lines.append(f"{_EXTRA_MARK} dealt after the boards")
+        hands.append(_EXTRA_NOTE)
     revealed = [board for board in view.boards if view.step.reveals(board.board)]
-    if revealed:
-        lines.append("")
-        lines.append("<b>Boards</b>")
-        lines += [_board_result(board, view.hands) for board in revealed]
-    if view.step >= ShowdownStep.POINTS:
-        lines.append("")
-        lines.append("<b>Points</b>")
-        lines.append(_points_line(view.hands))
-        lines.append(_verdict(view.hands, view.winners, view.scoop_seat, view.all_tied))
-    return "\n".join(lines)
+    boards_won = (
+        ["<b>Boards won</b>", *(_board_result(board, view.hands) for board in revealed)]
+        if revealed
+        else []
+    )
+    points = (
+        [
+            "<b>Points</b>",
+            _points_line(view.hands),
+            _verdict(view.hands, view.winners, view.scoop_seat, view.all_tied),
+        ]
+        if view.step >= ShowdownStep.POINTS
+        else []
+    )
+    return _block(
+        [
+            "🃏 <b>Showdown</b>",
+            _showdown_money(view),
+            _settings_strip(view.settings, y_defaulted=view.y_defaulted),
+        ],
+        _board_lines(view.boards),
+        hands,
+        boards_won,
+        points,
+        [f"Deck commitment <code>{view.commitment}</code>"],
+    )
+
+
+def _showdown_money(view: ShowdownView) -> str:
+    """The pot, the wager and who had the button, as the table said it."""
+    return (
+        f"{_a_head(view.settings.wager)} · pot {_amount(view.settings.pot(view.player_count))} · "
+        f"button {_name(view.hands[view.button_seat].player)}"
+    )
 
 
 def _board_lines(boards: Sequence[BoardView]) -> list[str]:
@@ -567,13 +713,13 @@ def _board_lines(boards: Sequence[BoardView]) -> list[str]:
 
 
 def _showdown_hand(hand: HandView) -> str:
-    return f"{hand.seat + 1}. {_name(hand.player)}  {_hand_cards(hand.hole, hand.extra)}"
+    return f"{hand.seat + 1}. {_name(hand.player)} — {_hand_cards(hand.hole, hand.extra)}"
 
 
 def _board_result(board: BoardView, hands: Sequence[HandView]) -> str:
     """``Board 1: Sam — two pair (A♦ A♠ K♦ K♠ Q♣)``, or who split it."""
     who = _seat_names(board.winners, hands)
-    share = f" · {_points(board.share)} each" if board.split else ""
+    share = f", {_points(board.share)} each" if board.split else ""
     return (
         f"{_BOARD_NAMES[board.board]}: {who} — {escape(board.description)}{share} "
         f"({_cards(board.best_cards)})"
@@ -581,7 +727,23 @@ def _board_result(board: BoardView, hands: Sequence[HandView]) -> str:
 
 
 def _points_line(hands: Sequence[HandView]) -> str:
-    return " · ".join(f"{_name(hand.player)} {_points(hand.points)}" for hand in hands)
+    """``Sam: 2 · Dana: 1 · Alex: 0``, with the colon keeping a name off its total."""
+    return " · ".join(f"{_name(hand.player)}: {_points(hand.points)}" for hand in hands)
+
+
+def _verdict_phrase(
+    hands: Sequence[HandView],
+    winners: Sequence[int],
+    scoop_seat: int | None,
+    all_tied: bool,
+) -> str:
+    """Who won, in a few words and no markup, for a title or a sentence."""
+    if all_tied:
+        return "everyone tied"
+    if scoop_seat is not None:
+        return f"{_name(hands[scoop_seat].player)} scoops all three boards"
+    who = _seat_names(winners, hands)
+    return f"{who} {'win' if len(winners) > 1 else 'wins'}"
 
 
 def _verdict(
@@ -590,46 +752,59 @@ def _verdict(
     scoop_seat: int | None,
     all_tied: bool,
 ) -> str:
-    """Who won, in one bold line."""
-    if all_tied:
-        return "<b>Everyone tied.</b>"
-    if scoop_seat is not None:
-        return f"<b>{_name(hands[scoop_seat].player)} scoops all three boards.</b>"
-    who = _seat_names(winners, hands)
-    verb = "win" if len(winners) > 1 else "wins"
-    return f"<b>{who} {verb}.</b>"
+    """The same, as the one bold sentence the showdown ends on."""
+    phrase = _verdict_phrase(hands, winners, scoop_seat, all_tied)
+    return f"<b>{phrase[:1].upper()}{phrase[1:]}.</b>"
 
 
 # ---------------------------------------------------------------------- result
 
 
 def render_result(view: ResultView) -> str:
-    """The result, posted as a new message so it lands at the bottom of the chat."""
-    number = f" #{view.flip_number}" if view.recorded else ""
-    lines = [
-        f"<b>Flip{number} result</b> — ESG, {_amount(view.settings.wager)} wager",
-        " · ".join(_result_board(board, view.hands) for board in view.boards),
-        "Points: "
-        + ", ".join(f"{_name(hand.player)} {_points(hand.points)}" for hand in view.hands),
-        _verdict(view.hands, view.winners, view.scoop_seat, view.all_tied),
-    ]
-    lines += _payment_lines(view.payments, view.hands)
-    lines.append(f"Deck seed: <code>{seed_to_hex(view.seed)}</code>")
-    if view.recorded:
-        lines.append(f"Check it with <code>/verify {view.flip_number}</code>.")
-    else:
-        lines.append(
-            "⚠️ This flip could not be saved, so it has no number, cannot be verified "
-            "and does not count in stats."
-        )
-    return "\n".join(lines)
+    """The result, posted as a new message so it lands at the bottom of the chat.
+
+    Who won is in the title and who owes whom is the section under it, because
+    those are the two things a player opens the message for. The hands are not
+    repeated: they are on the table message, which stays as the record.
+    """
+    scoop = [_scoop_note(view)] if view.scoop_seat is not None and view.settings.z > 1 else []
+    return _block(
+        [_result_title(view), *scoop],
+        ["<b>Settle up</b>", *_payment_lines(view.payments, view.hands)],
+        ["<b>Players</b>", *(_result_player(hand) for hand in view.hands)],
+        ["<b>Boards</b>", *(_result_board(board, view.hands) for board in view.boards)],
+        _result_proof(view),
+    )
+
+
+def _result_title(view: ResultView) -> str:
+    """``🏁 <b>Flip #42 — Sam wins</b>``, which is the whole result in one line."""
+    what = f"Flip #{view.flip_number}" if view.recorded else "Flip result"
+    phrase = _verdict_phrase(view.hands, view.winners, view.scoop_seat, view.all_tied)
+    return f"🏁 <b>{what} — {phrase}</b>"
+
+
+def _scoop_note(view: ResultView) -> str:
+    """What the scoop multiplier came to, for the one result it decides."""
+    return (
+        f"The scoop pays {view.settings.z}x the wager: "
+        f"{_amount(view.settings.wager * view.settings.z)} from each other player."
+    )
+
+
+def _result_player(hand: HandView) -> str:
+    """``1. Sam — 2 points · +$100``: how one seat did, in points and in money."""
+    return (
+        f"{hand.seat + 1}. {_name(hand.player)} — "
+        f"{_points_with_unit(hand.points)} · {_net(hand.net_dollars)}"
+    )
 
 
 def _result_board(board: BoardView, hands: Sequence[HandView]) -> str:
-    """``Board 1: Sam (two pair)``, or ``Board 1: Sam and Dana (two pair, 1/2 each)``."""
+    """``Board 1: Sam — two pair``, or who split it and for how much each."""
     who = _seat_names(board.winners, hands)
     share = f", {_points(board.share)} each" if board.split else ""
-    return f"{_RESULT_BOARD_NAMES[board.board]}: {who} ({escape(board.description)}{share})"
+    return f"{_BOARD_NAMES[board.board]}: {who} — {escape(board.description)}{share}"
 
 
 def _payment_lines(payments: Sequence[Payment], hands: Sequence[HandView]) -> list[str]:
@@ -643,34 +818,58 @@ def _payment_lines(payments: Sequence[Payment], hands: Sequence[HandView]) -> li
     ]
 
 
+def _result_proof(view: ResultView) -> list[str]:
+    """The settings, the seed and how to check the flip: the provenance, last."""
+    lines = [
+        f"{_a_head(view.settings.wager)} · pot {_amount(view.pot)}",
+        _settings_strip(view.settings, y_defaulted=view.y_defaulted),
+        f"Deck seed <code>{seed_to_hex(view.seed)}</code>",
+    ]
+    if view.recorded:
+        lines.append(f"Check it with <code>/verify {view.flip_number}</code>")
+    else:
+        lines.append(
+            "⚠️ This flip could not be saved, so it has no number, cannot be verified "
+            "and does not count in stats."
+        )
+    return lines
+
+
 # ------------------------------------------------------------------------ void
 
 
 def render_void(view: VoidView) -> str:
     """The notice that a flip was abandoned, with its seed if it had dealt.
 
-    A flip Start had settled says its four settings. One that never started has
-    only what it was asked for, so that is what its notice says -- a ``Z`` left
-    out of the command never became a number, and this flip is not going to give
-    it one. A notice the startup sweep built knows only the token, the reason and
-    the seed, so it says neither.
+    A flip Start had settled says its settled settings. One that never started
+    has only what it was asked for, so that is what its notice says -- a scoop
+    multiplier left out of the command never became a number, and this flip is
+    not going to give it one. A notice the startup sweep built knows only the
+    token, the reason and the seed, so it says neither.
     """
-    lines = ["⚠️ <b>Flip voided</b>"]
+    what: list[str] = []
     if view.settings is not None:
         y_defaulted = view.request is not None and view.request.y_defaulted
-        lines.append(_settings_line(view.settings, y_defaulted=y_defaulted))
+        what.append(
+            f"{_a_head(view.settings.wager)} · "
+            f"{_settings_strip(view.settings, y_defaulted=y_defaulted)}"
+        )
     elif view.request is not None:
-        lines.append(_request_line(view.request))
+        what.append(f"{_a_head(view.request.wager)} · {_request_strip(view.request)}")
     if view.players:
-        lines.append(f"Players: {_names(view.players)}")
-    lines.append(_VOID_REASONS[view.reason])
-    lines.append("Nothing was recorded and nobody owes anything.")
-    if view.seed is not None:
-        lines.append(f"Deck seed: <code>{seed_to_hex(view.seed)}</code>")
-        lines.append("The deal it would have made can still be checked against that seed.")
+        what.append(f"Players: {_names(view.players)}")
+    if view.seed is None:
+        seed = ["No cards had been dealt."]
     else:
-        lines.append("No cards had been dealt.")
-    return "\n".join(lines)
+        seed = [
+            f"Deck seed <code>{seed_to_hex(view.seed)}</code>",
+            "The deal it would have made can still be checked against that seed.",
+        ]
+    return _block(
+        [f"⚠️ <b>Flip voided</b> — {_NOTHING_RECORDED.lower()}", _VOID_REASONS[view.reason]],
+        what,
+        seed,
+    )
 
 
 # --------------------------------------------------------------- press answers
@@ -684,13 +883,12 @@ def render_peek(answer: PeekAnswer) -> str:
     :data:`ALERT_LIMIT`.
     """
     cards = answer.cards
-    count = "card" if len(cards) == 1 else "cards"
     lines = [
-        f"Seat {answer.seat + 1} · {len(cards)} {count}",
+        f"Your cards · seat {answer.seat + 1} · {_count(len(cards), 'card')}",
         _hand_cards(answer.hole, answer.extra),
     ]
     if answer.extra:
-        lines.append(f"{_EXTRA_MARK} new")
+        lines.append(f"{_EXTRA_MARK} just dealt")
     return _clip("\n".join(lines), ALERT_LIMIT)
 
 
@@ -708,8 +906,15 @@ def settings_error_text(error: SettingsError) -> str:
 
 
 def render_settings_error(error: SettingsError) -> str:
-    """What is wrong with a ``/flip`` command, and how to write it."""
-    return f"⚠️ {settings_error_text(error)}\n\n{USAGE}"
+    """What is wrong with a ``/flip`` command, and how to write it.
+
+    A complaint about one setting comes with the command's shape and an example:
+    it has already named the setting and the numbers it takes, so the full legend
+    would be a lecture. A complaint about the *set* of settings -- too few, too
+    many -- comes with the whole of :data:`USAGE`, because somebody who got the
+    shape wrong is the one person who needs it.
+    """
+    return f"⚠️ {settings_error_text(error)}\n\n{USAGE_SHORT if error.field else USAGE}"
 
 
 def render_already_open(request: FlipRequest) -> str:
@@ -718,9 +923,12 @@ def render_already_open(request: FlipRequest) -> str:
     The flip that is open may not have started, so what it is described by is
     what it was asked for -- the one thing that is true of it at either point.
     """
-    return (
-        f"A flip is already open here ({_request_line(request)}). "
-        "Join it, or wait for it to finish, before starting another."
+    return _block(
+        [
+            "⚠️ <b>A flip is already open here</b>",
+            f"{_a_head(request.wager)} · {_request_strip(request)}",
+        ],
+        ["Join that one, or wait for it to finish, before starting another."],
     )
 
 
@@ -739,6 +947,10 @@ def _figures(stats: PlayerStats) -> str:
     )
 
 
+_RANKS: Final = ("🥇", "🥈", "🥉")
+"""What the top three places are marked with. Everybody else gets their number."""
+
+
 def render_leaderboard(rows: Sequence[PlayerStats]) -> str:
     """The group's ranking, best first, or the line for a group with no flips yet.
 
@@ -747,33 +959,44 @@ def render_leaderboard(rows: Sequence[PlayerStats]) -> str:
     """
     if not rows:
         return NO_FINISHED_FLIPS
-    lines = ["🏆 <b>Leaderboard</b> — net winnings in this group"]
-    lines += [
-        f"{position}. {_display(stats.display_name)} — {_figures(stats)}"
-        for position, stats in enumerate(rows, start=1)
-    ]
-    lines.append("")
-    lines.append("A win is a flip whose net came out above $0. Only finished flips count.")
-    return _fit("\n".join(lines))
+    return _fit(
+        _block(
+            ["🏆 <b>Leaderboard</b> — net winnings in this group"],
+            [
+                f"{_RANKS[position - 1] if position <= len(_RANKS) else f'{position}.'} "
+                f"{_display(stats.display_name)} — {_figures(stats)}"
+                for position, stats in enumerate(rows, start=1)
+            ],
+            ["A win is a flip whose net came out above $0. Only finished flips count."],
+        )
+    )
 
 
 def render_stats(stats: PlayerStats) -> str:
     """One player's figures in this group, under the name they last played under."""
     return _fit(
-        f"📊 <b>{_display(stats.display_name)}</b> — stats in this group\n{_figures(stats)}"
+        _block(
+            [f"📊 <b>{_display(stats.display_name)}</b> — stats in this group"],
+            [
+                f"Net winnings: {_net(stats.net_dollars)}",
+                f"Flips played: {stats.flips_played}",
+                f"Wins: {stats.wins} ({stats.win_rate:.0%})",
+                f"Scoops: {stats.scoops}",
+            ],
+        )
     )
 
 
 def render_no_stats_for(name: str) -> str:
     """Somebody who is in the group but has not finished a flip in it."""
-    return _fit(f"{_display(name)} has not finished a flip in this group yet. {_PLAY_ONE}")
+    return _fit(f"{_display(name)} has not finished a flip in this group yet.\n{_PLAY_ONE}")
 
 
 def render_unknown_player(username: str) -> str:
     """A ``@name`` no flip in this group was played under."""
     return _fit(
-        f"I have no player by that name in this group ({_display(username)}). "
-        "The name has to be one they played a flip under here."
+        f"I have no player called {_display(username)} in this group.\n"
+        "A name only finds somebody who has played a flip here under it."
     )
 
 
@@ -782,44 +1005,51 @@ def render_unknown_player(username: str) -> str:
 
 def render_no_such_flip(flip_number: int) -> str:
     """A flip number this group does not have, including another group's."""
-    return (
-        f"There is no flip #{flip_number} in this group. Every group numbers its own flips, "
-        "and only a flip that finished and was saved has a number at all."
+    return _fit(
+        f"There is no flip #{flip_number} in this group.\n"
+        "Every group numbers its own flips, and only a flip that finished and was saved has a "
+        "number at all."
     )
 
 
 def render_unreadable_flip(flip_number: int) -> str:
     """A flip whose stored row will not read back, so nothing in it can be checked."""
-    return (
-        f"❌ <b>Flip #{flip_number} does not verify</b>\n"
-        "Its stored record cannot be read back at all, so there is nothing to check it against. "
-        "The database has been changed or damaged since the flip was saved."
+    return _fit(
+        _block(
+            [
+                f"❌ <b>Flip #{flip_number} does not verify</b>",
+                "Its stored record cannot be read back at all, so there is nothing to check it "
+                "against.",
+            ],
+            ["The database has been changed or damaged since the flip was saved."],
+        )
     )
 
 
 def render_verification(report: Verification) -> str:
-    """The pass or fail, the commitment, and for a fail what did not match."""
-    lines = [
-        f"{'✅' if report.passed else '❌'} <b>Flip #{report.flip_number} "
-        f"{'verifies' if report.passed else 'does not verify'}</b>",
-        f"Commitment <code>{report.commitment}</code>",
-    ]
+    """The pass or fail first, then the commitment and what did not match."""
     if report.passed:
-        lines.append(
+        verdict = [
+            f"✅ <b>Flip #{report.flip_number} verifies</b>",
             "The deal, the points and every net result follow from the seed that was "
-            "committed before a single card was shown."
-        )
-        lines.append(
+            "committed before a single card was shown.",
+        ]
+        detail = [
             "This is the bot checking its own records. For independent proof, recompute the "
             "deal from the seed in the flip's result message."
-        )
+        ]
     else:
         parts = _join([_VERIFY_PARTS[part] for part in PART_ORDER if report.differs(part)])
-        lines.append(f"These do not match what the stored seed produces: {parts}.")
+        verdict = [
+            f"❌ <b>Flip #{report.flip_number} does not verify</b>",
+            f"These do not match what the stored seed produces: {parts}.",
+        ]
+        detail = ["The stored flip has been changed since it was saved, or is damaged."]
         if report.differs(VerifyPart.COMMITMENT):
-            lines.append(f"The stored seed hashes to <code>{report.recomputed_commitment}</code>.")
-        lines.append("The stored flip has been changed since it was saved, or is damaged.")
-    return _fit("\n".join(lines))
+            detail.insert(
+                0, f"The stored seed hashes to <code>{report.recomputed_commitment}</code>."
+            )
+    return _fit(_block(verdict, [f"Commitment <code>{report.commitment}</code>"], detail))
 
 
 # -------------------------------------------------------------------- dispatch

@@ -4,14 +4,19 @@ A Telegram bot that runs ESG (Extremely Stupid Game) poker flips between members
 chat and posts the result of each one.
 
 ESG is a poker variant with two community boards plus a third scoring "board" for pure hand
-strength. Each flip is configured with a wager and three settings — `X` hole cards per player,
-up to `Y` extra cards after the boards, and a scoop multiplier `Z` — and every board is worth
-one point. The player with the most points takes the pot; a player who takes all three points
-scoops and collects `wager × Z` from each other player.
+strength. Each flip is configured with a wager and three settings — the **private cards** each
+player is dealt before the boards, the **extra cards** each player is dealt after them, and the
+**scoop multiplier** — and every board is worth one point. The player with the most points takes
+the pot; a player who takes all three points scoops and collects the wager times the scoop
+multiplier from each other player.
 
-Only the wager and `X` have to be given. Leave `Y` out and every player gets as many extra cards
-as the deck can give them all; leave `Z` out and a scoop pays the wager once for every player at
-the table. `/again` repeats the group's last flip with the same command.
+Those three are `X`, `Y` and `Z` in [`docs/fairness-spec.md`](docs/fairness-spec.md) and in the
+code. The bot itself always calls them by name, so nobody playing has to learn a letter.
+
+Only the wager and the private-card count have to be given. Leave the extra cards out and every
+player gets as many as the deck can give them all; leave the scoop multiplier out and a scoop
+pays the wager once for every player at the table. `/again` repeats the group's last flip with
+the same command.
 
 > **Status.** The bot runs flips end to end: `/flip` opens a lobby, the round deals itself,
 > players peek privately, and the result is posted and recorded. `/again` opens the same flip
@@ -99,7 +104,7 @@ the same topic, and a second `/flip` there is still refused while it runs.
 
 | Command | Does |
 | --- | --- |
-| `/flip <wager> <X> [<Y> [<Z>]]` | Opens a lobby, for example `/flip 50 5 2 3` or `/flip 50 5`. One flip per group at a time. |
+| `/flip <wager> <private cards> [extra cards] [scoop multiplier]` | Opens a lobby, for example `/flip 50 5 2 3` or `/flip 50 5`. One flip per group at a time. |
 | `/again` | Opens a lobby with the settings of the last flip this group finished, written the same way. |
 | `/leaderboard` | The group's top twenty by net winnings, with flips played, win rate and scoops. |
 | `/stats` | Your own figures. `/stats @name`, or `/stats` as a reply to somebody's message, shows theirs. |
@@ -108,15 +113,17 @@ the same topic, and a second `/flip` there is still refused while it runs.
 The bot registers these five with Telegram on every start, so they appear when someone types `/` in a
 chat with it. If Telegram refuses, the bot logs a warning and runs anyway; the commands still work typed out.
 
-`Y` and `Z` are optional and positional, so `Z` needs a `Y` in front of it: `/flip 50 5` leaves both
-out, `/flip 50 5 2` leaves `Z` out. A `Y` left out means **as many extra cards as the deck can give
-every player** — the deal never sends out a round it cannot complete, so this is not a promise of 21
-cards. A `Z` left out means **the number of players**, counted when Start locks the player list, so a
-scoop then pays the wager once for every player at the table. Until Start the lobby says so rather
-than showing a figure the next Join would change.
+The extra cards and the scoop multiplier are optional and positional, so a scoop multiplier needs
+an extra-cards number in front of it: `/flip 50 5` leaves both out, `/flip 50 5 2` leaves only the
+multiplier out. Extra cards left out means **as many as the deck can give every player** — the deal
+never sends out a round it cannot complete, so this is not a promise of 21 cards. A scoop multiplier
+left out means **the number of players**, counted when Start locks the player list, so a scoop then
+pays the wager once for every player at the table. Until Start the lobby says so rather than showing
+a figure the next Join would change.
 
-`/again` repeats the last flip's **command**, not the figures it came to: a flip whose `Z` was left
-out is opened with `Z` left out again and settles on however many players turn up this time. Whoever
+`/again` repeats the last flip's **command**, not the figures it came to: a flip whose scoop
+multiplier was left out is opened with it left out again and settles on however many players turn up
+this time. Whoever
 types it opens the flip and is its first player — the last flip's players are not invited back. It
 obeys every `/flip` rule, so it is refused while a flip is open in the group. Only a flip that was
 recorded counts, so a lobby that was cancelled or a round that was voided is never "the last flip";
@@ -128,6 +135,84 @@ or leaves. Once the round starts, the one button left is **Peek**, which shows a
 cards in a private pop-up — no direct chat with the bot needed. Peek works from the moment the
 deck commitment is posted, so no hand is ever shown before the group has been told which deck it
 came from.
+
+### What the bot says
+
+Every message leads with what has happened, keeps one fact to a line, and puts the things you
+check afterwards — the commitment, the seed, the `/verify` line — at the bottom. Titles and
+section headings are bold, and hashes, seeds and commands are monospace.
+
+A lobby, opened with `/flip 50 5` so the bot fills in the last two settings:
+
+```
+🎲 New flip — $50 a head
+5 private cards each · as many extra cards as fit · scoop pays the wager times the number of players
+
+Players 3/8
+1. Sam
+2. Dana
+3. Alex
+
+Opened by Sam, who presses Start when everyone is in.
+```
+
+The table, once every card is out. This is one message, edited as the deal goes on:
+
+```
+🃏 Every card is out
+$50 a head · pot $150 · button Dana
+5 private cards each · up to 2 extra cards each · scoop pays 3x the wager
+
+Board 1  J♠ 8♠ 4♣ 2♠ 3♠
+Board 2  2♥ 5♦ Q♣ 10♣ 7♥
+
+Players
+1. Sam — 7 cards
+2. Dana — 7 cards
+3. Alex — 7 cards
+
+Extra cards: 2 each, so everybody holds 7. Press Peek again to see them.
+👀 1 of 3 has peeked.
+Showdown in 30 seconds, or 10 seconds after everyone has peeked.
+
+Deck commitment 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925
+```
+
+The result, posted as a new message so it lands at the bottom of the chat — who won in the title,
+who owes whom straight under it:
+
+```
+🏁 Flip #42 — Sam wins
+
+Settle up
+Dana owes Sam $50
+Alex owes Sam $50
+
+Players
+1. Sam — 2 points · +$100
+2. Dana — 1 point · -$50
+3. Alex — 0 points · -$50
+
+Boards
+Board 1: Sam — flush, jack high
+Board 2: Dana — three of a kind, queens
+Hand strength: Sam — two pair, nines and twos
+
+$50 a head · pot $150
+5 private cards each · up to 2 extra cards each · scoop pays 3x the wager
+Deck seed 8a1f0c7d4e2b96035af81c6d2e4b7a09f35c81d6b240e9af7c15b803d6e24a1f
+Check it with /verify 42
+```
+
+The names above are made up; the seed is shown in full, as it always is.
+
+Every other message — the showdown, a void notice, the peek pop-up, each usage line, the
+leaderboard, `/stats`, `/verify` — is in `tests/samples.py`, which renders the lot from real
+flips:
+
+```sh
+uv run python -m tests.samples samples.txt
+```
 
 All five commands belong in a group: flips, and the stats that come out of them, are kept per
 group, so the same person has separate figures in each one — and so is the last flip `/again`
@@ -404,16 +489,20 @@ And in `esgbot/telegram`:
 
 ## Settings and their limits
 
-| Setting | Meaning | Limits | Left out of the command |
-| --- | --- | --- | --- |
-| wager | Whole dollars each player puts in | 1 to 1,000,000 | — (required) |
-| `X` | Hole cards dealt to each player | 5 to 21 | — (required) |
-| `Y` | Maximum extra cards per player after both boards | 0 to 21 | the maximum, 21, which deals as many as fit |
-| `Z` | Scoop multiplier (`1` means no bonus) | 1 to 100 | the number of players, fixed at Start |
+| Setting | In the spec | Meaning | Limits | Left out of the command |
+| --- | --- | --- | --- | --- |
+| wager | — | Whole dollars each player puts in | 1 to 1,000,000 | — (required) |
+| private cards | `X` | Dealt to each player before the boards | 5 to 21 | — (required) |
+| extra cards | `Y` | Dealt to each player after both boards, as many as fit up to this many | 0 to 21 | the maximum, 21, which deals as many as fit |
+| scoop multiplier | `Z` | What taking all three boards pays, as a multiple of the wager (`1` is no bonus) | 1 to 100 | the number of players, fixed at Start |
+
+The middle column is what [`docs/fairness-spec.md`](docs/fairness-spec.md) and the code call each
+one. No message the bot sends uses those letters, apart from one legend in the `/flip` help, which
+is there so the two can be read side by side.
 
 Settings are plain whole numbers written in digits only: `$50`, `5.0`, `1,000` and `-3` are
 rejected rather than guessed at. Two boards take ten of the 52 cards, which leaves 42 for the
-players, so at most `floor(42 / X)` players fit — eight at `X = 5`.
+players, so at most `floor(42 / private cards)` players fit — eight at five private cards each.
 
 A flip is recorded with the settings it played, all four of them, plus which of them were left out
 of the command. The figures are what `/verify` checks and what the money followed from; the two
