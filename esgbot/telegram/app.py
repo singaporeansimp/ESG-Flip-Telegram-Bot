@@ -35,6 +35,8 @@ from typing import Final
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand
 
 from esgbot.engine import FlipRegistry
 from esgbot.logging_setup import get_logger
@@ -44,7 +46,7 @@ from esgbot.telegram.handlers import build_router
 from esgbot.telegram.settings import BotSettings
 from esgbot.telegram.sweep import void_leftover_flips
 
-__all__ = ["ALLOWED_UPDATES", "run_bot"]
+__all__ = ["ALLOWED_UPDATES", "COMMANDS", "register_commands", "run_bot"]
 
 _logger = get_logger(__name__)
 
@@ -53,6 +55,31 @@ ALLOWED_UPDATES: Final = ("message", "callback_query")
 service message that says a group has become a supergroup. Everything else is
 left on the server, which is also all the bot needs under Telegram's default
 privacy mode."""
+
+COMMANDS: Final = (
+    BotCommand(command="flip", description="Start a flip: /flip <wager> <X> <Y> <Z>"),
+    BotCommand(command="leaderboard", description="Top players in this group by net winnings"),
+    BotCommand(command="stats", description="Your stats, or /stats @name, or reply to someone"),
+    BotCommand(command="verify", description="Check a finished flip: /verify <flip number>"),
+)
+"""The slash commands Telegram offers when someone types ``/`` in a chat with the
+bot. They are what the bot answers to, written down once, so the menu cannot
+promise a command the handlers do not have."""
+
+
+async def register_commands(bot: Bot) -> None:
+    """Tell Telegram which commands to list, and carry on if it will not.
+
+    The menu is a convenience: every command works typed out in full, so a
+    Telegram that refuses or cannot be reached here is no reason to stop the bot
+    from starting. The failure is logged, and the next start tries again.
+    """
+    try:
+        await bot.set_my_commands(list(COMMANDS))
+    except TelegramAPIError as error:
+        _logger.warning("could not register the command menu: %s", error)
+    else:
+        _logger.info("registered %d commands", len(COMMANDS))
 
 
 async def run_bot(settings: BotSettings) -> None:
@@ -81,6 +108,7 @@ async def run_bot(settings: BotSettings) -> None:
                 build_router(registry=registry, gateway=gateway, store=database)
             )
             await void_leftover_flips(store=database, gateway=gateway)
+            await register_commands(bot)
             _logger.info("polling for updates")
             try:
                 await dispatcher.start_polling(

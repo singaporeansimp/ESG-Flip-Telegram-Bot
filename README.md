@@ -99,6 +99,9 @@ the same topic, and a second `/flip` there is still refused while it runs.
 | `/stats` | Your own figures. `/stats @name`, or `/stats` as a reply to somebody's message, shows theirs. |
 | `/verify <flip number>` | Re-runs a finished flip against its seed and reports whether everything still matches. |
 
+The bot registers these four with Telegram on every start, so they appear when someone types `/` in a
+chat with it. If Telegram refuses, the bot logs a warning and runs anyway; the commands still work typed out.
+
 The lobby's **Join**, **Leave**, **Start** and **Cancel** buttons run the rest. Only whoever
 opened the flip can Start or Cancel it, and a lobby closes itself after ten minutes with no joins
 or leaves. Once the round starts, the one button left is **Peek**, which shows a player their own

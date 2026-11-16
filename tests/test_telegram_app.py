@@ -29,8 +29,9 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramMigrateToChat
-from aiogram.methods import EditMessageReplyMarkup
+from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat
+from aiogram.methods import EditMessageReplyMarkup, SetMyCommands
+from aiogram.types import BotCommand
 from aiohttp import web
 
 from esgbot.engine import Flip, FlipRegistry, timing
@@ -95,12 +96,20 @@ class _WatchedSession(_Session):
 class _Bot(FakeTelegram):
     """A bot shaped like the real one: the client calls, plus a session to close."""
 
-    __slots__ = ("session", "token")
+    __slots__ = ("command_failure", "commands", "session", "token")
 
     def __init__(self, token: str) -> None:
         super().__init__()
         self.token = token
         self.session = _Session()
+        self.commands: list[BotCommand] = []
+        self.command_failure: BaseException | None = None
+
+    async def set_my_commands(self, commands: list[BotCommand]) -> bool:
+        if self.command_failure is not None:
+            raise self.command_failure
+        self.commands = commands
+        return True
 
 
 class _Dispatcher:
@@ -169,12 +178,13 @@ class _Starter:
     then :meth:`run` it and read what came of it.
     """
 
-    __slots__ = ("_bots", "_dispatchers", "database")
+    __slots__ = ("_bots", "_dispatchers", "command_failure", "database")
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.database = _Database()
         self._bots: list[_Bot] = []
         self._dispatchers: list[_Dispatcher] = []
+        self.command_failure: BaseException | None = None
         opener = self._opener()
         monkeypatch.setattr("esgbot.telegram.app.Database", opener)
         monkeypatch.setattr("esgbot.telegram.app.Bot", self._make_bot)
@@ -194,6 +204,7 @@ class _Starter:
 
     def _make_bot(self, *, token: str, **_: object) -> _Bot:
         bot = _Bot(token)
+        bot.command_failure = self.command_failure
         self._bots.append(bot)
         return bot
 
@@ -246,6 +257,48 @@ def test_the_bot_is_built_from_the_settings_it_was_given(start: _Starter) -> Non
 
     assert started.database.opened_path == "/elsewhere/esg.db"
     assert started.bot.token == _TOKEN
+
+
+# ------------------------------------------------------- the command menu
+
+
+def test_the_command_menu_is_registered_before_polling_starts(start: _Starter) -> None:
+    started = start.run()
+
+    assert [command.command for command in started.bot.commands] == [
+        "flip",
+        "leaderboard",
+        "stats",
+        "verify",
+    ]
+    assert started.bot.commands == list(app.COMMANDS)
+
+
+def test_every_menu_entry_is_one_telegram_will_accept() -> None:
+    names = [command.command for command in app.COMMANDS]
+
+    assert len(names) == len(set(names))
+    for command in app.COMMANDS:
+        assert command.command == command.command.lower()
+        assert 1 <= len(command.command) <= 32
+        assert 3 <= len(command.description) <= 256
+    # Building the real request is what Telegram's own limits get checked against.
+    SetMyCommands(commands=list(app.COMMANDS))
+
+
+def test_a_refused_menu_does_not_stop_the_bot_from_polling(
+    start: _Starter, caplog: pytest.LogCaptureFixture
+) -> None:
+    start.command_failure = TelegramBadRequest(
+        method=SetMyCommands(commands=[]), message="Bad Request: nope"
+    )
+    with caplog.at_level(logging.WARNING, logger="esgbot"):
+        started = start.run()
+
+    assert started.bot.commands == []
+    assert started.dispatcher.calls_before_polling >= 0
+    assert started.bot.session.closed
+    assert "could not register the command menu" in caplog.text
 
 
 # ------------------------------------------------- a group that moved while down
