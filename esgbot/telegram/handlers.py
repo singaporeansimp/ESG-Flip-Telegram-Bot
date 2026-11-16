@@ -1,9 +1,18 @@
 """The things that arrive from Telegram: a command, a press, a migration.
 
-``/flip`` reads its four settings with the game's own parser, so the limits and
-the complaints are the ones written down in :mod:`esgbot.game.rules`, and opens a
+``/flip`` reads its settings with the game's own parser, so the limits and the
+complaints are the ones written down in :mod:`esgbot.game.rules`, and opens a
 lobby through the registry, which refuses a second flip in a group that already
-has one.
+has one. Only the wager and ``X`` have to be given: what is left off the end of
+the command is what the bot fills in, and the flip carries it as a
+:class:`~esgbot.game.rules.FlipRequest` until Start settles it.
+
+``/again`` is that same command again, as it was typed: it reads the settings of
+the last flip the group *finished* -- storage keeps one row per group for exactly
+this -- and opens a lobby with them, so a value that was left out is left out
+again and settles on this table rather than on the last one. Both commands open
+their lobby through the same call, which is what makes every rule about starting
+a flip hold for either of them.
 
 ``/leaderboard``, ``/stats`` and ``/verify`` read finished flips back out. They
 are all scoped to the group the command was sent in: a flip number or a player
@@ -52,7 +61,7 @@ from esgbot.engine import (
     PermanentFailureError,
     Player,
 )
-from esgbot.game.rules import SettingsError, parse_settings_tokens
+from esgbot.game.rules import FlipRequest, SettingsError, parse_flip_request
 from esgbot.logging_setup import get_logger
 from esgbot.storage import (
     DEFAULT_LEADERBOARD_LIMIT,
@@ -113,6 +122,10 @@ class CommandStore(MigrationStore, Protocol):
 
     async def fetch_flip(self, *, group_id: int, flip_number: int) -> StoredFlip | None:
         """One finished flip with its players and stored deal, or ``None``."""
+        ...
+
+    async def last_flip_request(self, group_id: int) -> FlipRequest | None:
+        """What the last flip this group finished was asked for, or ``None``."""
         ...
 
 
@@ -234,30 +247,23 @@ def build_router(
 
     gateway.follow_migrations(group_moved)
 
-    @router.message(Command("flip"))
-    async def open_flip(message: Message, command: CommandObject) -> None:
-        """``/flip <wager> <X> <Y> <Z>``: validate the settings and open a lobby."""
-        user = message.from_user
-        if user is None:
-            return
-        target = _target(message)
-        if not _in_group(message):
-            await gateway.say(target, render.NO_FLIP_IN_PRIVATE)
-            return
-        try:
-            settings = parse_settings_tokens((command.args or "").split())
-        except SettingsError as error:
-            await gateway.say(target, render.render_settings_error(error))
-            return
+    async def open_lobby(target: MessageTarget, user: User, request: FlipRequest) -> None:
+        """Open a lobby for this request, and say so when it cannot be opened.
+
+        Both commands that start a flip end up here, so every rule about
+        starting one -- one flip at a time per group, the topic it belongs to,
+        what a group is told when the lobby will not post -- is written once and
+        holds for ``/again`` exactly as it does for ``/flip``.
+        """
         try:
             await registry.create_flip(
                 group_id=target.group_id,
                 topic_id=target.topic_id,
                 starter=_player(user),
-                settings=settings,
+                settings=request,
             )
         except FlipAlreadyOpenError as already:
-            await gateway.say(target, render.render_already_open(already.flip.settings))
+            await gateway.say(target, render.render_already_open(already.flip.request))
         except PermanentFailureError:
             # The lobby would not post, so there is nowhere to complain about it.
             _logger.warning(
@@ -266,6 +272,68 @@ def build_router(
         except (StorageError, sqlite3.Error) as error:
             _logger.error("could not open a flip in group %d: %s", target.group_id, error)
             await gateway.say(target, render.STORAGE_TROUBLE)
+
+    @router.message(Command("flip"))
+    async def open_flip(message: Message, command: CommandObject) -> None:
+        """``/flip <wager> <X> [<Y> [<Z>]]``: read the settings and open a lobby.
+
+        The wager and X are required; Y and Z are positional, so what is left
+        off the end is what the bot fills in -- Y with the maximum, which the
+        deal reads as as many extra cards as fit, and Z with the number of
+        players, once Start says how many that is.
+        """
+        user = message.from_user
+        if user is None:
+            return
+        target = _target(message)
+        if not _in_group(message):
+            await gateway.say(target, render.NO_FLIP_IN_PRIVATE)
+            return
+        try:
+            request = parse_flip_request((command.args or "").split())
+        except SettingsError as error:
+            await gateway.say(target, render.render_settings_error(error))
+            return
+        await open_lobby(target, user, request)
+
+    @router.message(Command("again"))
+    async def flip_again(message: Message, command: CommandObject) -> None:
+        """``/again``: the last flip this group finished, with the same settings.
+
+        The same settings means the same command, not the same figures: a flip
+        whose ``Z`` was left out is opened with ``Z`` left out again, so it
+        settles on however many players turn up this time. Whoever types it
+        opens the flip and is its first player; the last flip's players are not
+        invited.
+
+        Only a flip that was recorded counts as one this group has played, so a
+        lobby that was cancelled or a round that was voided is not "the last
+        flip" -- neither of them was ever written down.
+        """
+        user = message.from_user
+        if user is None:
+            return
+        target = _target(message)
+        if not _in_group(message):
+            await gateway.say(target, render.NO_FLIP_IN_PRIVATE)
+            return
+        if command.args:
+            # Settings given to /again would be settings it ignores, and a flip
+            # quietly played at somebody else's wager is worth a sentence.
+            await gateway.say(target, render.AGAIN_USAGE)
+            return
+        try:
+            request = await store.last_flip_request(target.group_id)
+        except (StorageError, sqlite3.Error) as error:
+            _logger.error(
+                "could not read group %d's last flip settings: %s", target.group_id, error
+            )
+            await gateway.say(target, render.STORAGE_TROUBLE)
+            return
+        if request is None:
+            await gateway.say(target, render.NO_FLIP_TO_REPEAT)
+            return
+        await open_lobby(target, user, request)
 
     @router.message(Command("leaderboard"))
     async def show_leaderboard(message: Message) -> None:

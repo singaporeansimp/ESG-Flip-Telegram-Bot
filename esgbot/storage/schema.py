@@ -1,20 +1,30 @@
 """The database file: how it is opened, and the tables inside it.
 
-Three tables, all described in the Tech Plan's data model:
+Four tables:
 
 ``flips``
     One row per finished flip, holding its settings, the seed and commitment, the
     full deal as JSON and when it started and finished. The primary key is the
     public flip number, so it is handed out by the insert and never reused.
+    ``y_defaulted`` and ``z_defaulted`` say which settings the command left to
+    the bot, so the flip can be repeated as it was typed.
 ``flip_players``
     One row per seat in a finished flip, with the player's name as it was at the
     time, their exact points, their net dollars and whether they scooped.
 ``active_flips``
     One row per flip in progress, keyed by the flip's internal token. A restart
     reads whatever is left here and voids it.
+``group_last_flip``
+    One row per group: the settings of the last flip it finished, as they were
+    typed, and when that was. This is what ``/again`` reads. It is written in the
+    same transaction as the flip that sets it, so the two cannot disagree, and
+    it is a record of its own rather than a question asked of ``flips`` -- a
+    group's last settings are a fact the bot keeps, not one it works out again
+    each time.
 
-Only finished flips reach ``flips``, so cancelled and voided flips are absent
-from stats by construction rather than by a filter.
+Only finished flips reach ``flips`` and ``group_last_flip``, so cancelled and
+voided flips are absent from stats, and from ``/again``, by construction rather
+than by a filter.
 
 The schema version lives in ``PRAGMA user_version``. :func:`apply_migrations`
 walks it forward one step at a time, inside a transaction, which leaves room to
@@ -56,7 +66,7 @@ __all__ = [
     "schema_version",
 ]
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 """The newest schema version this code understands."""
 
 BUSY_TIMEOUT_MS: Final = 5_000
@@ -118,7 +128,48 @@ _MIGRATION_1: Final[tuple[str, ...]] = (
     "CREATE INDEX active_flips_by_group ON active_flips(group_id)",
 )
 
-_MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_MIGRATION_1,)
+_SETTING_CHECKS: Final = f"""
+        wager        INTEGER NOT NULL CHECK (wager BETWEEN {WAGER_MIN} AND {WAGER_MAX}),
+        x            INTEGER NOT NULL CHECK (x BETWEEN {X_MIN} AND {X_MAX}),
+        y            INTEGER NOT NULL CHECK (y BETWEEN {Y_MIN} AND {Y_MAX}),
+        z            INTEGER NOT NULL CHECK (z BETWEEN {Z_MIN} AND {Z_MAX}),
+        y_defaulted  INTEGER NOT NULL CHECK (y_defaulted IN (0, 1)),
+        z_defaulted  INTEGER NOT NULL CHECK (z_defaulted IN (0, 1))"""
+"""The settings columns of :data:`_MIGRATION_2`'s new table, limits and all."""
+
+# Version 2 adds two things, both about a command that leaves Y or Z out:
+#
+# * ``flips`` remembers which of a recorded flip's settings the bot filled in,
+#   so ``/again`` can repeat the command rather than the figures it came to.
+#   Rows written by version 1 were all typed out in full, which is what the
+#   default of 0 says about every one of them.
+# * ``group_last_flip`` is the per-group record ``/again`` reads. Each group's
+#   newest flip is backfilled into it, so ``/again`` works in a group whose
+#   history predates this version.
+_MIGRATION_2: Final[tuple[str, ...]] = (
+    "ALTER TABLE flips ADD COLUMN y_defaulted INTEGER NOT NULL DEFAULT 0 "
+    "CHECK (y_defaulted IN (0, 1))",
+    "ALTER TABLE flips ADD COLUMN z_defaulted INTEGER NOT NULL DEFAULT 0 "
+    "CHECK (z_defaulted IN (0, 1))",
+    f"""
+    CREATE TABLE group_last_flip (
+        group_id     INTEGER PRIMARY KEY,{_SETTING_CHECKS},
+        updated_at   TEXT NOT NULL
+    )
+    """,
+    """
+    INSERT INTO group_last_flip (
+        group_id, wager, x, y, z, y_defaulted, z_defaulted, updated_at
+    )
+    SELECT flips.group_id, flips.wager, flips.x, flips.y, flips.z, 0, 0, flips.finished_at
+    FROM flips
+    JOIN (
+        SELECT group_id, MAX(flip_number) AS newest FROM flips GROUP BY group_id
+    ) AS latest ON latest.group_id = flips.group_id AND latest.newest = flips.flip_number
+    """,
+)
+
+_MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_MIGRATION_1, _MIGRATION_2)
 
 _logger = get_logger(__name__)
 

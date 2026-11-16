@@ -30,7 +30,7 @@ from typing import Final
 
 from esgbot.game import fairness
 from esgbot.game.deal import Deal
-from esgbot.game.rules import Settings
+from esgbot.game.rules import Y_DEFAULT, FlipRequest, Settings
 
 __all__ = [
     "COMMITMENT_LENGTH",
@@ -123,11 +123,21 @@ class FinishedFlip:
     Storage records what it is given; proving that the seed, deal and results
     belong together is what ``/verify`` does.
 
+    ``settings`` is always all four values: a flip is recorded after Start has
+    settled them, so nothing read back out of storage has a gap in it.
+    ``y_defaulted`` and ``z_defaulted`` say which of them the command left to the
+    bot, which is the one thing the numbers cannot say and the one thing
+    ``/again`` needs: see :attr:`request`. They have to agree with the settings
+    they describe -- a defaulted ``Y`` is :data:`~esgbot.game.rules.Y_DEFAULT`
+    and a defaulted ``Z`` is the number of players -- so a row claiming
+    otherwise is damage rather than a flip somebody played.
+
     Raises:
         ValueError: if the players do not match the deal seat for seat, the
-            settings disagree with the deal's X or Y, the seed or commitment is
-            malformed, more than one player scooped, or a time is naive or the
-            flip finishes before it started.
+            settings disagree with the deal's X or Y, a defaulted Y or Z
+            disagrees with what it would have been filled in with, the seed or
+            commitment is malformed, more than one player scooped, or a time is
+            naive or the flip finishes before it started.
     """
 
     group_id: int
@@ -138,6 +148,8 @@ class FinishedFlip:
     players: tuple[FlipPlayer, ...]
     started_at: datetime
     finished_at: datetime
+    y_defaulted: bool = False
+    z_defaulted: bool = False
 
     def __post_init__(self) -> None:
         fairness.validate_seed(self.seed)
@@ -171,11 +183,32 @@ class FinishedFlip:
         scoopers = [player.seat for player in self.players if player.scooped]
         if len(scoopers) > 1:
             raise ValueError(f"only one player can scoop, got seats {scoopers}")
+        if self.y_defaulted and self.settings.y != Y_DEFAULT:
+            raise ValueError(
+                f"Y was left out of the command, so it must be {Y_DEFAULT}, not {self.settings.y}"
+            )
+        if self.z_defaulted and self.settings.z != self.deal.player_count:
+            raise ValueError(
+                f"Z was left out of the command, so it must be the {self.deal.player_count} "
+                f"players, not {self.settings.z}"
+            )
 
     @property
     def player_count(self) -> int:
         """How many players were in the flip, which is how many seats it had."""
         return self.deal.player_count
+
+    @property
+    def request(self) -> FlipRequest:
+        """The command this flip was opened with, as it was typed.
+
+        The settings with the defaulted values taken back out, which is what
+        ``/again`` repeats: a flip whose ``Z`` was the number of players asks for
+        the number of players again rather than for the figure that table came to.
+        """
+        return FlipRequest.from_settings(
+            self.settings, y_defaulted=self.y_defaulted, z_defaulted=self.z_defaulted
+        )
 
     @property
     def button_seat(self) -> int:

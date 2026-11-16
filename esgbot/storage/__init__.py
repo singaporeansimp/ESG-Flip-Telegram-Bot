@@ -19,9 +19,13 @@ The database answers four kinds of question, and nothing else knows any SQL:
   in the group.
 * **Read one flip back.** :meth:`Database.fetch_flip` returns a flip with its
   players and stored deal, which is what ``/verify`` re-runs.
+* **Repeat a group's last flip.** :meth:`Database.last_flip_request` gives the
+  settings of the last flip a group finished, as they were typed, which is what
+  ``/again`` opens a new lobby with. One row per group, written by
+  :meth:`Database.record_flip` in the same transaction as the flip that set it.
 
 :meth:`Database.migrate_group_id` moves a group's rows when Telegram turns it
-into a supergroup, so stats carry over.
+into a supergroup, so stats and its last settings carry over.
 
 Values keep their exact types: points are :class:`fractions.Fraction`, money is
 whole-dollar :class:`int`, times are timezone-aware, and seeds are the same 32

@@ -39,7 +39,7 @@ from esgbot.engine.flip import Flip, Settler, settle_in_thread
 from esgbot.engine.gateway import Gateway
 from esgbot.engine.store import FlipStore
 from esgbot.engine.views import Player
-from esgbot.game.rules import Settings
+from esgbot.game.rules import FlipRequest, Settings
 from esgbot.logging_setup import get_logger
 
 __all__ = ["FlipAlreadyOpenError", "FlipRegistry"]
@@ -125,13 +125,18 @@ class FlipRegistry:
         *,
         group_id: int,
         starter: Player,
-        settings: Settings,
+        settings: Settings | FlipRequest,
         topic_id: int | None = None,
         token: str | None = None,
     ) -> Flip:
         """Open a lobby: post its message, write its row, and start its timer.
 
         The starter joins as the first player.
+
+        ``settings`` is what the command asked for: a
+        :class:`~esgbot.game.rules.FlipRequest` when it left ``Y`` or ``Z`` to
+        the bot, or plain :class:`~esgbot.game.rules.Settings` when it gave all
+        four. Either way the flip resolves them at Start; see :class:`Flip`.
 
         Raises:
             FlipAlreadyOpenError: if this group already has one open.

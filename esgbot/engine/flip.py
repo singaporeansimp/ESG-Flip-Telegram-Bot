@@ -17,6 +17,16 @@ works until Start. A lobby that goes
 cancels itself, and so does one that reaches
 :data:`~esgbot.engine.timing.LOBBY_MAX_AGE_SECONDS` old.
 
+**The settings are settled at Start, not before.** A flip is opened with a
+:class:`~esgbot.game.rules.FlipRequest`: what the command asked for, which may
+leave ``Y`` and ``Z`` to the bot. ``Y`` could be filled in at any time, but
+``Z`` cannot -- left out, it is the number of players, and the player list is
+only final when Start locks it. So Start resolves the request against that list
+and keeps the result on the round, and everything from there on -- the deal, the
+showdown, the money, the stored flip, ``/verify`` -- sees ordinary
+:class:`~esgbot.game.rules.Settings` with all four values in them. The lobby,
+which has nothing settled, shows what was asked for instead.
+
 **The round.** Start locks the player list and draws the seed, and takes the
 round on: the lobby timer goes, the half-hour watchdog starts counting from that
 instant, and the round's own task exists before the press is answered, so
@@ -138,7 +148,7 @@ from esgbot.engine.views import (
 )
 from esgbot.game import fairness
 from esgbot.game.deal import Deal, deal_cards
-from esgbot.game.rules import MIN_PLAYERS, Settings
+from esgbot.game.rules import MIN_PLAYERS, FlipRequest, Settings
 from esgbot.game.scoring import Board
 from esgbot.game.settlement import FlipOutcome, settle_deal
 from esgbot.logging_setup import get_logger
@@ -265,12 +275,19 @@ class _Round:
     is the same order the deal uses. ``started_monotonic`` is Start itself, which
     is where the watchdog's half hour runs from however long the press takes to
     answer or the round takes to get going.
+
+    ``settings`` belongs here because this is where the flip's settings become
+    all four numbers: a ``Z`` the command left out is the number of players, and
+    the player list is only final at Start. Everything after this point -- the
+    deal, the showdown, the money, the stored flip -- works from these, so
+    nothing downstream has to know what the command left out.
     """
 
     seed: bytes
     commitment: str
     deal: Deal
     seated: tuple[Player, ...]
+    settings: Settings
     started_at: datetime
     started_monotonic: float
 
@@ -309,9 +326,9 @@ class Flip:
         "_peeked",
         "_phase",
         "_players",
+        "_request",
         "_round",
         "_run_task",
-        "_settings",
         "_settle",
         "_stage",
         "_start_answered",
@@ -333,7 +350,7 @@ class Flip:
         *,
         group_id: int,
         topic_id: int | None,
-        settings: Settings,
+        settings: Settings | FlipRequest,
         starter: Player,
         gateway: Gateway,
         store: FlipStore,
@@ -347,11 +364,19 @@ class Flip:
         The registry calls this and then opens the flip, which is what posts the
         lobby and writes its row. ``settle`` and ``token`` are seams for tests;
         the defaults are what the bot runs.
+
+        ``settings`` is what the command asked for: a
+        :class:`~esgbot.game.rules.FlipRequest` when it left ``Y`` or ``Z`` to
+        the bot, or plain :class:`~esgbot.game.rules.Settings`, which is the same
+        thing with nothing left out. Either way the flip keeps it as a request
+        and resolves it at Start.
         """
         self._token = token if token is not None else new_token()
         self._group_id = group_id
         self._topic_id = topic_id
-        self._settings = settings
+        self._request = (
+            settings if isinstance(settings, FlipRequest) else FlipRequest.from_settings(settings)
+        )
         self._starter = starter
         self._gateway = gateway
         self._store = store
@@ -421,9 +446,24 @@ class Flip:
         return MessageTarget(group_id=self._group_id, topic_id=self._topic_id)
 
     @property
-    def settings(self) -> Settings:
-        """The wager and the three game settings, fixed when the flip was created."""
-        return self._settings
+    def request(self) -> FlipRequest:
+        """What the command asked for, fixed when the flip was created.
+
+        This is the flip as it was typed, so ``/again`` can ask for the same
+        again: a ``Y`` or ``Z`` the command left out is left out here too.
+        """
+        return self._request
+
+    @property
+    def settings(self) -> Settings | None:
+        """The four settings this flip is playing, or ``None`` before Start.
+
+        Start is where they become four numbers, because a ``Z`` left out of the
+        command is the number of players and the player list is not final until
+        then. :attr:`request` is what the flip was asked to be before that.
+        """
+        round_ = self._round
+        return None if round_ is None else round_.settings
 
     @property
     def starter(self) -> Player:
@@ -624,7 +664,7 @@ class Flip:
             return self._lobby_gone()
         if any(seated.user_id == player.user_id for seated in self._players):
             return Notice.ALREADY_JOINED
-        if len(self._players) >= self._settings.max_players:
+        if len(self._players) >= self._request.max_players:
             return Notice.LOBBY_FULL
         self._players.append(player)
         self._note_activity()
@@ -653,8 +693,11 @@ class Flip:
     def _begin_round(self, user_id: int) -> Notice:
         """Start, under the state lock: everything that must happen in one go.
 
-        The player list, the seed, the button and every card are fixed here, so
-        nothing a later press does can change the deal.
+        The player list, the settings, the seed, the button and every card are
+        fixed here, so nothing a later press does can change the deal -- or the
+        money, which is the other thing the player list decides: a ``Z`` the
+        command left out becomes the number of players, and this is the one
+        moment at which that number is final.
         """
         if self._phase is not FlipPhase.LOBBY:
             return self._lobby_gone()
@@ -663,18 +706,20 @@ class Flip:
         if len(self._players) < MIN_PLAYERS:
             return Notice.NEED_MORE_PLAYERS
         seated = tuple(self._players)
+        settings = self._request.resolve(len(seated))
         seed = fairness.generate_seed()
         deal = deal_cards(
             seed=seed,
             player_ids=[player.user_id for player in seated],
-            x=self._settings.x,
-            y=self._settings.y,
+            x=settings.x,
+            y=settings.y,
         )
         self._round = _Round(
             seed=seed,
             commitment=fairness.commitment(seed),
             deal=deal,
             seated=seated,
+            settings=settings,
             started_at=self._clock.now(),
             started_monotonic=self._clock.monotonic(),
         )
@@ -684,12 +729,13 @@ class Flip:
         # so a peek during the board reveals already counts.
         self._hands_final = deal.extra_count == 0
         _logger.info(
-            "flip %s started in group %d: %d players, X=%d Y=%d extra=%d",
+            "flip %s started in group %d: %d players, X=%d Y=%d Z=%d extra=%d",
             self._token,
             self._group_id,
             len(seated),
-            self._settings.x,
-            self._settings.y,
+            settings.x,
+            settings.y,
+            settings.z,
             deal.extra_count,
         )
         return Notice.STARTED
@@ -976,7 +1022,7 @@ class Flip:
                 flip that has been called off does not get a showdown.
         """
         round_ = self._require_round()
-        outcome = await self._settle(round_.deal, self._settings)
+        outcome = await self._settle(round_.deal, round_.settings)
         async with self._state_lock:
             self._outcome = outcome
             if not self._enter(FlipPhase.SHOWDOWN):
@@ -1380,7 +1426,7 @@ class Flip:
     def _lobby_view(self, status: LobbyStatus = LobbyStatus.OPEN) -> LobbyView:
         return LobbyView(
             token=self._token,
-            settings=self._settings,
+            request=self._request,
             status=status,
             starter=self._starter,
             players=tuple(self._players),
@@ -1394,7 +1440,8 @@ class Flip:
         extra = deal.extra_count if stage is TableStage.PEEKING else 0
         return TableView(
             token=self._token,
-            settings=self._settings,
+            settings=round_.settings,
+            y_defaulted=self._request.y_defaulted,
             commitment=round_.commitment,
             stage=stage,
             button_seat=deal.button_seat,
@@ -1418,7 +1465,8 @@ class Flip:
         outcome = self._require_outcome()
         return ShowdownView(
             token=self._token,
-            settings=self._settings,
+            settings=round_.settings,
+            y_defaulted=self._request.y_defaulted,
             commitment=round_.commitment,
             step=step,
             button_seat=round_.deal.button_seat,
@@ -1434,7 +1482,8 @@ class Flip:
         return ResultView(
             token=self._token,
             flip_number=flip_number,
-            settings=self._settings,
+            settings=round_.settings,
+            y_defaulted=self._request.y_defaulted,
             commitment=round_.commitment,
             seed=round_.seed,
             button_seat=round_.deal.button_seat,
@@ -1446,11 +1495,19 @@ class Flip:
         )
 
     def _void_view(self, reason: VoidReason, *, started: bool) -> VoidView:
+        """The notice for a flip that was abandoned, saying as much as is known.
+
+        A flip Start had settled says its four settings; one that never started
+        has only the request it was opened with, so that is what its notice
+        carries. Both are passed, because the notice shows the settled figures
+        where there are any and ``/again`` is the only other reader of a request.
+        """
         round_ = self._round
         return VoidView(
             token=self._token,
             reason=reason,
-            settings=self._settings,
+            request=self._request,
+            settings=None if round_ is None else round_.settings,
             players=round_.seated if round_ is not None else tuple(self._players),
             seed=round_.seed if started and round_ is not None else None,
             commitment=round_.commitment if started and round_ is not None else None,
@@ -1498,7 +1555,9 @@ class Flip:
         outcome = self._require_outcome()
         return FinishedFlip(
             group_id=self._group_id,
-            settings=self._settings,
+            settings=round_.settings,
+            y_defaulted=self._request.y_defaulted,
+            z_defaulted=self._request.z_defaulted,
             seed=round_.seed,
             commitment=round_.commitment,
             deal=round_.deal,

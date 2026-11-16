@@ -64,11 +64,14 @@ async def _play_out(world: BotHarness, flip: Flip, *, limit: int = 40) -> None:
 
 
 async def _finished_flip(
-    world: BotHarness, monkeypatch: pytest.MonkeyPatch, seed: bytes = _SEED
+    world: BotHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: bytes = _SEED,
+    command: str = "/flip 50 5 2 3",
 ) -> int:
     """Play a two-player flip on this seed to its end and return its flip number."""
     use_seed(monkeypatch, seed)
-    await world.flip_command()
+    await world.flip_command(command)
     flip = world.registry.flip_for_group(world.group_id)
     assert flip is not None
     await world.feed(
@@ -146,6 +149,80 @@ def test_verify_passes_for_a_flip_recorded_by_a_real_engine_run_and_shows_the_co
         assert f"Flip #{number} verifies" in text
         assert fairness.commitment(_SEED) in text
         assert "does not verify" not in text
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------------------- a flip recorded with defaults
+
+
+def _flags(world: BotHarness, number: int) -> tuple[int, int]:
+    row = world.store.connection.execute(
+        "SELECT y_defaulted, z_defaulted FROM flips WHERE flip_number = ?", (number,)
+    ).fetchone()
+    return int(row[0]), int(row[1])
+
+
+@pytest.mark.parametrize(
+    ("command", "flags"),
+    [
+        pytest.param("/flip 50 5", (1, 1), id="y-and-z-defaulted"),
+        pytest.param("/flip 50 5 2", (0, 1), id="z-defaulted"),
+    ],
+)
+def test_verify_passes_for_a_flip_played_with_defaults(
+    monkeypatch: pytest.MonkeyPatch, command: str, flags: tuple[int, int]
+) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        number = await _finished_flip(world, monkeypatch, command=command)
+        assert _flags(world, number) == flags
+        text = await _verify(world, str(number))
+        assert f"Flip #{number} verifies" in text
+        assert fairness.commitment(_SEED) in text
+        assert "does not verify" not in text
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_verify_does_not_care_whether_the_defaults_were_typed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        number = await _finished_flip(world, monkeypatch, command="/flip 50 5")
+        assert _flags(world, number) == (1, 1)
+        # Y is 21 and Z is the two players, so "typed in full" is a consistent row.
+        _tamper(world, "UPDATE flips SET y_defaulted = 0, z_defaulted = 0")
+        assert _flags(world, number) == (0, 0)
+        text = await _verify(world, str(number))
+        assert f"Flip #{number} verifies" in text
+        assert "does not verify" not in text
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_verify_still_fails_a_tampered_flip_that_was_played_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        number = await _finished_flip(world, monkeypatch, command="/flip 50 5")
+        _tamper(
+            world,
+            "UPDATE flip_players SET net_dollars = net_dollars + 7 "
+            "WHERE flip_number = ? AND seat = 0",
+            (number,),
+        )
+        _names_only(await _verify(world, str(number)), VerifyPart.NETS)
+        _tamper(world, "UPDATE flips SET seed = ?", (_OTHER_SEED_HEX,))
+        text = await _verify(world, str(number))
+        failure_line = next(line for line in text.splitlines() if "do not match" in line)
+        assert "the commitment" in failure_line
+        assert "the deal" in failure_line
         await world.close()
 
     asyncio.run(scenario())

@@ -26,11 +26,13 @@ from esgbot.engine import (
     ShowdownView,
     TableStage,
     TableView,
+    VoidReason,
+    VoidView,
 )
 from esgbot.game import fairness
 from esgbot.game.cards import Card
 from esgbot.game.deal import Deal
-from esgbot.game.rules import Settings
+from esgbot.game.rules import FlipRequest, Settings
 from esgbot.game.scoring import Board
 from esgbot.game.settlement import Payment
 from esgbot.storage import FinishedFlip
@@ -38,6 +40,7 @@ from tests.engine_helpers import (
     Harness,
     harness,
     outcome_for,
+    player,
     seed_where,
     use_seed,
 )
@@ -513,5 +516,113 @@ def test_every_view_type_the_flip_produces_is_one_the_tests_know() -> None:
             await world.finish(flip)
             kinds: set[type[FlipView]] = {type(view) for view in world.gateway.views}
             assert kinds == {LobbyView, CommitmentView, TableView, ShowdownView, ResultView}
+
+    asyncio.run(scenario())
+
+
+def test_the_lobby_view_carries_the_request_and_is_full_at_its_cap() -> None:
+    async def scenario() -> None:
+        world = harness()
+        request = FlipRequest(wager=50, x=21)
+        async with world.registry:
+            flip = await world.open_lobby(joiners=0, settings=request)
+            (opening,) = world.gateway.posts
+            assert isinstance(opening.view, LobbyView)
+            assert opening.view.request == request
+            assert not hasattr(opening.view, "settings")
+            assert opening.view.request.max_players == 2
+            assert not opening.view.full
+
+            await flip.join(player(12), press_id=world.press())
+            lobby = world.gateway.edits[-1].view
+            assert isinstance(lobby, LobbyView)
+            assert lobby.request == request
+            assert lobby.full
+
+    asyncio.run(scenario())
+
+
+def test_the_lobby_of_a_plain_settings_flip_carries_it_as_a_request() -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            await world.open_lobby(joiners=1)
+            lobby = world.gateway.views_of(LobbyView)[-1]
+            assert isinstance(lobby, LobbyView)
+            assert lobby.request == FlipRequest(wager=50, x=5, y=2, z=3)
+            assert not lobby.request.y_defaulted
+            assert not lobby.request.z_defaulted
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("request_", "y_defaulted", "resolved"),
+    [
+        (FlipRequest(wager=50, x=5), True, Settings(wager=50, x=5, y=21, z=3)),
+        (FlipRequest(wager=50, x=5, y=21), False, Settings(wager=50, x=5, y=21, z=3)),
+        (FlipRequest(wager=50, x=5, z=2), True, Settings(wager=50, x=5, y=21, z=2)),
+        (FlipRequest(wager=50, x=5, y=2), False, Settings(wager=50, x=5, y=2, z=3)),
+    ],
+)
+def test_every_dealing_view_carries_the_resolved_settings_and_whether_y_was_left_out(
+    request_: FlipRequest, y_defaulted: bool, resolved: Settings
+) -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=2, settings=request_)
+            await world.start(flip)
+            await world.finish(flip)
+
+            tables = _tables(world)
+            showdowns = _showdowns(world)
+            assert tables
+            assert showdowns
+            finals: list[TableView | ShowdownView | ResultView] = [
+                *tables,
+                *showdowns,
+                _result(world),
+            ]
+            for view in finals:
+                assert view.settings == resolved
+                assert view.y_defaulted is y_defaulted
+            assert _one_recorded(world).settings == resolved
+
+    asyncio.run(scenario())
+
+
+def test_a_void_notice_for_a_flip_that_never_started_has_a_request_and_no_settings() -> None:
+    async def scenario() -> None:
+        world = harness()
+        request = FlipRequest(wager=50, x=5)
+        async with world.registry:
+            flip = await world.open_lobby(joiners=1, settings=request)
+            await flip.void(VoidReason.TIMED_OUT)
+
+            void = world.gateway.posts[-1].view
+            assert isinstance(void, VoidView)
+            assert not void.started
+            assert void.settings is None
+            assert void.request == request
+            assert void.seed is None
+
+    asyncio.run(scenario())
+
+
+def test_a_void_notice_for_a_started_flip_carries_the_resolved_settings_and_the_request() -> None:
+    async def scenario() -> None:
+        world = harness()
+        request = FlipRequest(wager=50, x=5)
+        async with world.registry:
+            flip = await world.open_lobby(joiners=2, settings=request)
+            await world.start(flip)
+            await flip.void(VoidReason.TIMED_OUT)
+
+            void = world.gateway.posts[-1].view
+            assert isinstance(void, VoidView)
+            assert void.started
+            assert void.settings == Settings(wager=50, x=5, y=21, z=3)
+            assert void.request == request
 
     asyncio.run(scenario())

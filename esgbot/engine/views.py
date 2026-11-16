@@ -40,7 +40,7 @@ from enum import IntEnum, StrEnum
 from fractions import Fraction
 
 from esgbot.game.cards import Card
-from esgbot.game.rules import Settings
+from esgbot.game.rules import FlipRequest, Settings
 from esgbot.game.scoring import Board
 from esgbot.game.settlement import Payment
 
@@ -174,15 +174,20 @@ class LobbyStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class LobbyView:
-    """The lobby message: the settings, who is in, and what became of it.
+    """The lobby message: the settings asked for, who is in, and what became of it.
 
-    The player cap is ``settings.max_players``, and ``players`` is in join order.
+    ``request`` rather than :class:`~esgbot.game.rules.Settings`, because a lobby
+    has nothing settled: a ``Z`` left out of the command is the number of
+    players, and the next Join would change it, so there is no figure to show
+    until Start locks the list. The renderer says what was asked for instead.
+
+    The player cap is ``request.max_players``, and ``players`` is in join order.
     ``starter`` keeps control of the lobby even after leaving the player list, so
     they are not always one of ``players``.
     """
 
     token: str
-    settings: Settings
+    request: FlipRequest
     status: LobbyStatus
     starter: Player
     players: tuple[Player, ...]
@@ -195,7 +200,7 @@ class LobbyView:
     @property
     def full(self) -> bool:
         """Whether the lobby is at the cap for this flip's X."""
-        return len(self.players) >= self.settings.max_players
+        return len(self.players) >= self.request.max_players
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +262,13 @@ class TableView:
 
     ``voided`` marks a flip that was abandoned: show the table as it stands,
     without the Peek button.
+
+    ``settings`` is fully resolved, Start having fixed the player list, so a
+    ``Z`` the command left out is a figure here. ``y_defaulted`` is the one thing
+    the figures cannot say: a ``Y`` the bot filled in is
+    :data:`~esgbot.game.rules.Y_DEFAULT`, which asks for as many extra cards as
+    the deck can give every seat rather than for 21 of them, and showing "21"
+    would promise cards no deck has.
     """
 
     token: str
@@ -270,6 +282,7 @@ class TableView:
     extra_count: int = 0
     peeked: int = 0
     voided: bool = False
+    y_defaulted: bool = False
 
     @property
     def player_count(self) -> int:
@@ -367,6 +380,9 @@ class ShowdownView:
     Everything is here from the first step; ``step`` says how much of it to show.
     ``boards`` holds one :class:`BoardView` per :class:`~esgbot.game.scoring.Board`
     in that order, and ``hands`` one :class:`HandView` per seat, in seat order.
+
+    ``y_defaulted`` means the same here as on :class:`TableView`: the ``Y`` in
+    ``settings`` was filled in by the bot and reads as "as many as fit".
     """
 
     token: str
@@ -378,6 +394,7 @@ class ShowdownView:
     hands: tuple[HandView, ...]
     winners: tuple[int, ...]
     scoop_seat: int | None = None
+    y_defaulted: bool = False
 
     @property
     def player_count(self) -> int:
@@ -402,6 +419,10 @@ class ResultView:
     with seats for ``payer`` and ``receiver``. It is empty when nobody owes
     anybody, which is what a table that ties all round gives. ``seed`` is the
     seed the commitment was made over, revealed now.
+
+    ``y_defaulted`` means the same here as on :class:`TableView`, and travels
+    with the result so a message that ever states the settings in full states
+    them the way the group was told them.
     """
 
     token: str
@@ -415,6 +436,7 @@ class ResultView:
     winners: tuple[int, ...]
     payments: tuple[Payment, ...]
     scoop_seat: int | None = None
+    y_defaulted: bool = False
 
     @property
     def recorded(self) -> bool:
@@ -462,10 +484,17 @@ class VoidView:
 
     ``seed`` is set when the flip had started, so the group can still check what
     the deal would have been, and is ``None`` for a lobby that never dealt a
-    card. ``settings`` and ``players`` say what the flip was and who was in it.
+    card. ``request``, ``settings`` and ``players`` say what the flip was and who
+    was in it.
 
-    They are optional because of the one case where nobody knows: the sweep that
-    runs after a restart has only the flip's leftover row -- its token, its
+    The two ways of saying what it was are the two things that can be known.
+    ``settings`` is there for a flip Start had settled, and is what the notice
+    shows. A lobby that never started has only the ``request`` it was opened
+    with -- a ``Z`` left out of the command never became a number -- so that is
+    what its notice shows instead.
+
+    All of it is optional because of the one case where nobody knows: the sweep
+    that runs after a restart has only the flip's leftover row -- its token, its
     message and its seed -- and no memory of the flip itself. A notice built from
     a row says the flip was voided and reveals the seed, and leaves out what it
     cannot say.
@@ -477,6 +506,7 @@ class VoidView:
     players: tuple[Player, ...] = ()
     seed: bytes | None = None
     commitment: str | None = None
+    request: FlipRequest | None = None
 
     @property
     def started(self) -> bool:

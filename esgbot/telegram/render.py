@@ -71,6 +71,7 @@ from esgbot.game.rules import (
     Y_MIN,
     Z_MAX,
     Z_MIN,
+    FlipRequest,
     Settings,
     SettingsError,
 )
@@ -80,12 +81,14 @@ from esgbot.storage import PlayerStats
 from esgbot.verify import PART_ORDER, Verification, VerifyPart
 
 __all__ = [
+    "AGAIN_USAGE",
     "ALERT_LIMIT",
     "MESSAGE_LIMIT",
     "NAME_LIMIT",
     "NO_FINISHED_FLIPS",
     "NO_FLIPS_OF_YOUR_OWN",
     "NO_FLIP_IN_PRIVATE",
+    "NO_FLIP_TO_REPEAT",
     "NO_STATS_IN_PRIVATE",
     "STATS_TROUBLE",
     "STATS_USAGE",
@@ -125,6 +128,20 @@ NAME_LIMIT: Final = 32
 
 _EXTRA_MARK: Final = "*"
 """What marks a card dealt after the boards, in the group and in the pop-up."""
+
+_AS_MANY_AS_FIT: Final = "as many extra cards as fit"
+"""What a ``Y`` the bot filled in asks for, in words.
+
+:data:`~esgbot.game.rules.Y_DEFAULT` is 21, but the deal only sends out a round
+of extra cards it can give every seat, so the figure would promise cards the
+deck does not have. The settings line says this instead of a number.
+"""
+
+_Y_AS_FITS: Final = "Y as many as fit"
+"""The same, in the space a settings line has for it."""
+
+_Z_PER_PLAYER: Final = "Z number of players"
+"""A ``Z`` left out of the command, while the player list can still change."""
 
 _TO_COME: Final = "— to come —"
 _SHORTENED: Final = "\n…"
@@ -175,16 +192,25 @@ _VOID_REASONS: Final[dict[VoidReason, str]] = {
 }
 
 USAGE: Final = (
-    "Usage: <code>/flip &lt;wager&gt; &lt;X&gt; &lt;Y&gt; &lt;Z&gt;</code> — "
-    "for example <code>/flip 50 5 2 3</code>.\n"
+    "Usage: <code>/flip &lt;wager&gt; &lt;X&gt; [&lt;Y&gt; [&lt;Z&gt;]]</code> — "
+    "for example <code>/flip 50 5 2 3</code>, or <code>/flip 50 5</code>.\n"
     f"Wager {WAGER_MIN:,} to {WAGER_MAX:,} · X {X_MIN} to {X_MAX} · "
-    f"Y {Y_MIN} to {Y_MAX} · Z {Z_MIN} to {Z_MAX}, all plain whole numbers."
+    f"Y {Y_MIN} to {Y_MAX} · Z {Z_MIN} to {Z_MAX}, all plain whole numbers.\n"
+    f"Leave Y out for {_AS_MANY_AS_FIT}, and Z out for the number of players. "
+    "They go in that order, so Z needs a Y in front of it."
 )
 """How to write the command, shown with every complaint about its settings."""
 
 NO_FLIP_IN_PRIVATE: Final = (
     "ESG flips are played in a group. Add me to a group chat and run <code>/flip</code> there."
 )
+
+AGAIN_USAGE: Final = (
+    "Usage: <code>/again</code> on its own — it repeats this group's last flip with the "
+    "same settings. To play different ones, give them to <code>/flip</code>."
+)
+"""Shown when ``/again`` is given settings, which it has no use for."""
+
 
 STORAGE_TROUBLE: Final = (
     "I could not open the flip: the database is not available right now. Try again in a moment."
@@ -216,6 +242,12 @@ VERIFY_USAGE: Final = (
 NO_FINISHED_FLIPS: Final = f"No flips have finished in this group yet. {_PLAY_ONE}"
 
 NO_FLIPS_OF_YOUR_OWN: Final = f"You have not finished a flip in this group yet. {_PLAY_ONE}"
+
+NO_FLIP_TO_REPEAT: Final = (
+    f"No flips have finished in this group yet, so there is nothing to repeat. {_PLAY_ONE}"
+)
+"""``/again`` in a group with no history. A flip that was cancelled or voided was
+never recorded, so it is not a flip this group has played."""
 
 
 # --------------------------------------------------------------------- plumbing
@@ -301,9 +333,38 @@ def _points(points: Fraction) -> str:
     return f"{points.numerator}/{points.denominator}"
 
 
-def _settings_line(settings: Settings) -> str:
-    """``$50 a head · X 5 · Y 2 · Z 3``."""
-    return f"{_amount(settings.wager)} a head · X {settings.x} · Y {settings.y} · Z {settings.z}"
+def _settings_line(settings: Settings, *, y_defaulted: bool = False) -> str:
+    """``$50 a head · X 5 · Y 2 · Z 3``, for a flip whose settings are settled.
+
+    A ``Y`` the bot filled in is said in words rather than as the 21 it is, for
+    the reason :data:`_AS_MANY_AS_FIT` gives. ``Z`` is a figure here however it
+    was arrived at: Start has fixed the player list, so the number is exact.
+    """
+    return " · ".join(
+        (
+            f"{_amount(settings.wager)} a head",
+            f"X {settings.x}",
+            _Y_AS_FITS if y_defaulted else f"Y {settings.y}",
+            f"Z {settings.z}",
+        )
+    )
+
+
+def _request_line(request: FlipRequest) -> str:
+    """The same line for a flip that has not started: what was asked for.
+
+    Nothing is settled in a lobby, so a value the command left out is named
+    rather than guessed at -- above all ``Z``, which is the number of players and
+    would change with the next Join.
+    """
+    return " · ".join(
+        (
+            f"{_amount(request.wager)} a head",
+            f"X {request.x}",
+            _Y_AS_FITS if request.y is None else f"Y {request.y}",
+            _Z_PER_PLAYER if request.z is None else f"Z {request.z}",
+        )
+    )
 
 
 def _clip(text: str, limit: int) -> str:
@@ -334,9 +395,9 @@ def _fit(text: str) -> str:
 
 
 def render_lobby(view: LobbyView) -> str:
-    """The lobby message: the settings, who is in, and what became of it."""
-    cap = view.settings.max_players
-    lines = [_lobby_heading(view.status), _settings_line(view.settings)]
+    """The lobby message: the settings asked for, who is in, and what became of it."""
+    cap = view.request.max_players
+    lines = [_lobby_heading(view.status), _request_line(view.request)]
     if view.status is LobbyStatus.OPEN:
         lines.append(f"Up to {cap} players.")
     lines.append("")
@@ -403,7 +464,7 @@ def render_commitment(view: CommitmentView) -> str:
 def render_table(view: TableView) -> str:
     """The table message, through the deal: boards, card counts and the peek rule."""
     lines = [
-        f"🃏 <b>ESG flip</b> — {_settings_line(view.settings)}",
+        f"🃏 <b>ESG flip</b> — {_settings_line(view.settings, y_defaulted=view.y_defaulted)}",
         f"Pot {_amount(view.settings.pot(view.player_count))} · "
         f"button {_name(view.seats[view.button_seat].player)}",
         f"Commitment <code>{view.commitment}</code>",
@@ -471,7 +532,7 @@ def _peeked_line(view: TableView) -> str:
 def render_showdown(view: ShowdownView) -> str:
     """The table at the showdown, showing everything up to ``view.step``."""
     lines = [
-        f"🃏 <b>Showdown</b> — {_settings_line(view.settings)}",
+        f"🃏 <b>Showdown</b> — {_settings_line(view.settings, y_defaulted=view.y_defaulted)}",
         f"Pot {_amount(view.settings.pot(view.player_count))} · "
         f"button {_name(view.hands[view.button_seat].player)}",
         f"Commitment <code>{view.commitment}</code>",
@@ -588,12 +649,18 @@ def _payment_lines(payments: Sequence[Payment], hands: Sequence[HandView]) -> li
 def render_void(view: VoidView) -> str:
     """The notice that a flip was abandoned, with its seed if it had dealt.
 
-    A notice the startup sweep built knows only the token, the reason and the
-    seed, so everything else is left out rather than guessed at.
+    A flip Start had settled says its four settings. One that never started has
+    only what it was asked for, so that is what its notice says -- a ``Z`` left
+    out of the command never became a number, and this flip is not going to give
+    it one. A notice the startup sweep built knows only the token, the reason and
+    the seed, so it says neither.
     """
     lines = ["⚠️ <b>Flip voided</b>"]
     if view.settings is not None:
-        lines.append(_settings_line(view.settings))
+        y_defaulted = view.request is not None and view.request.y_defaulted
+        lines.append(_settings_line(view.settings, y_defaulted=y_defaulted))
+    elif view.request is not None:
+        lines.append(_request_line(view.request))
     if view.players:
         lines.append(f"Players: {_names(view.players)}")
     lines.append(_VOID_REASONS[view.reason])
@@ -645,10 +712,14 @@ def render_settings_error(error: SettingsError) -> str:
     return f"⚠️ {settings_error_text(error)}\n\n{USAGE}"
 
 
-def render_already_open(settings: Settings) -> str:
-    """The refusal when the group already has a flip open."""
+def render_already_open(request: FlipRequest) -> str:
+    """The refusal when the group already has a flip open.
+
+    The flip that is open may not have started, so what it is described by is
+    what it was asked for -- the one thing that is true of it at either point.
+    """
     return (
-        f"A flip is already open here ({_settings_line(settings)}). "
+        f"A flip is already open here ({_request_line(request)}). "
         "Join it, or wait for it to finish, before starting another."
     )
 

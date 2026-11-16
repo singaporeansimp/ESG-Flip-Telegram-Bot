@@ -34,8 +34,8 @@ from esgbot.engine import (
 )
 from esgbot.engine.flip import _FlipOverError
 from esgbot.game import fairness
-from esgbot.game.deal import Deal
-from esgbot.game.rules import Settings
+from esgbot.game.deal import Deal, extra_rounds_for
+from esgbot.game.rules import FlipRequest, Settings
 from esgbot.game.settlement import FlipOutcome
 from esgbot.storage import FinishedFlip, StorageError
 from tests.engine_helpers import (
@@ -50,9 +50,12 @@ from tests.engine_helpers import (
     Posted,
     harness,
     harness_over,
+    outcome_for,
     player,
     players,
+    seed_where,
     settle_inline,
+    use_seed,
 )
 
 _OTHER_GROUP = -2002
@@ -1481,5 +1484,250 @@ def test_the_lobby_timeout_after_a_migration_is_posted_in_the_new_group() -> Non
             assert last.view.status is LobbyStatus.TIMED_OUT
             assert last.target == MessageTarget(group_id=_MIGRATED_GROUP, topic_id=_TOPIC)
             assert world.registry.flip_for_group(_MIGRATED_GROUP) is None
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------- defaulted settings
+
+_OMITTED = FlipRequest(wager=50, x=5)
+"""A ``/flip 50 5``: Y and Z are left for the bot to fill in."""
+
+
+def _settings_of(flip: Flip) -> Settings | None:
+    """The settings read afresh, so the type checker does not assume they cannot change."""
+    return flip.settings
+
+
+@pytest.mark.parametrize("player_count", [2, 3, 8])
+def test_an_omitted_z_becomes_the_number_of_players_when_start_is_pressed(
+    player_count: int,
+) -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=player_count - 1, settings=_OMITTED)
+            assert flip.player_count == player_count
+            assert flip.settings is None
+
+            await world.start(flip)
+
+            assert _settings_of(flip) == Settings(wager=50, x=5, y=21, z=player_count)
+            assert flip.request == _OMITTED
+            assert (flip.request.y, flip.request.z) == (None, None)
+
+    asyncio.run(scenario())
+
+
+def test_a_player_leaving_before_start_changes_the_resolved_z() -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=3, settings=_OMITTED)
+            assert flip.player_count == 4
+            assert await flip.leave(13, press_id=world.press()) is Notice.LEFT
+            assert flip.settings is None
+
+            await world.start(flip)
+            resolved = _settings_of(flip)
+            assert resolved is not None
+            assert resolved.z == 3
+
+    asyncio.run(scenario())
+
+
+def test_a_join_after_start_cannot_change_the_resolved_z() -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=2, settings=_OMITTED)
+            await world.start(flip)
+            resolved = flip.settings
+            assert resolved == Settings(wager=50, x=5, y=21, z=3)
+
+            late = await flip.join(player(40), press_id=world.press())
+
+            assert late is not Notice.JOINED
+            assert player(40) not in flip.players
+            assert flip.settings == resolved
+            await world.finish(flip)
+            assert world.store.recorded[-1].settings == resolved
+            assert len(world.store.recorded[-1].players) == 3
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("player_count", [2, 3])
+def test_an_explicit_z_is_not_touched_by_the_number_of_players(player_count: int) -> None:
+    async def scenario() -> None:
+        given = Settings(wager=50, x=5, y=2, z=6)
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=player_count - 1, settings=given)
+            await world.start(flip)
+
+            assert flip.settings == given
+            assert flip.request == FlipRequest(wager=50, x=5, y=2, z=6)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("player_count", [2, 3, 8])
+def test_an_omitted_y_deals_as_many_extra_cards_as_fit(player_count: int) -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=player_count - 1, settings=_OMITTED)
+            await world.start(flip)
+            await world.finish(flip)
+
+            recorded = world.store.recorded[-1]
+            expected = extra_rounds_for(player_count=player_count, x=5, y=21)
+            assert recorded.settings.y == 21
+            assert recorded.deal.y == recorded.settings.y
+            assert recorded.deal.extra_count == expected
+            assert recorded.deal.extra_count < 21
+
+    asyncio.run(scenario())
+
+
+def test_the_extra_cards_of_an_omitted_y_depend_on_the_table_size() -> None:
+    assert extra_rounds_for(player_count=2, x=5, y=21) == 16
+    assert extra_rounds_for(player_count=8, x=5, y=21) == 0
+
+
+@pytest.mark.parametrize("player_count", [2, 3])
+def test_a_scoop_pays_the_wager_times_the_player_count_when_z_is_omitted(
+    player_count: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        ids = [11 + index for index in range(player_count)]
+        explicit = Settings(wager=50, x=5, y=21, z=player_count)
+        seed = seed_where(
+            lambda outcome: outcome.scoop_seat is not None, player_ids=ids, settings=explicit
+        )
+        scooper = outcome_for(seed, ids, explicit).scoop_seat
+        assert scooper is not None
+        use_seed(monkeypatch, seed)
+
+        nets: list[list[int]] = []
+        requests: tuple[FlipRequest | Settings, ...] = (_OMITTED, explicit)
+        for request in requests:
+            world = harness()
+            async with world.registry:
+                flip = await world.open_lobby(joiners=player_count - 1, settings=request)
+                await world.start(flip)
+                await world.finish(flip)
+                (recorded,) = world.store.recorded
+                assert recorded.settings == explicit
+                nets.append([line.net_dollars for line in recorded.players])
+
+        owed = 50 * player_count
+        expected = [
+            owed * (player_count - 1) if seat == scooper else -owed for seat in range(player_count)
+        ]
+        assert nets == [expected, expected]
+        assert sum(expected) == 0
+
+    asyncio.run(scenario())
+
+
+def test_the_recorded_flip_carries_the_resolved_settings_and_what_was_typed() -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=2, settings=_OMITTED)
+            await world.start(flip)
+            await world.finish(flip)
+
+            recorded = world.store.recorded[-1]
+            assert recorded.settings.z == 3
+            assert recorded.settings.y == 21
+            assert recorded.y_defaulted is True
+            assert recorded.z_defaulted is True
+            assert recorded.request == _OMITTED
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("request_", "y_defaulted", "z_defaulted"),
+    [
+        (FlipRequest(wager=50, x=5, y=2, z=3), False, False),
+        (FlipRequest(wager=50, x=5, y=2), False, True),
+        (FlipRequest(wager=50, x=5, z=3), True, False),
+    ],
+)
+def test_the_recorded_flags_say_which_values_were_typed(
+    request_: FlipRequest, y_defaulted: bool, z_defaulted: bool
+) -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=2, settings=request_)
+            await world.start(flip)
+            await world.finish(flip)
+
+            recorded = world.store.recorded[-1]
+            assert recorded.y_defaulted is y_defaulted
+            assert recorded.z_defaulted is z_defaulted
+            assert recorded.request == request_
+
+    asyncio.run(scenario())
+
+
+def test_a_plain_settings_flip_records_nothing_as_defaulted() -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=2)
+            await world.start(flip)
+            await world.finish(flip)
+
+            recorded = world.store.recorded[-1]
+            assert recorded.settings == world.settings
+            assert recorded.y_defaulted is False
+            assert recorded.z_defaulted is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("x", "cap"), [(5, 8), (7, 6), (21, 2)])
+def test_the_player_cap_of_a_defaulted_flip_is_still_set_by_x(x: int, cap: int) -> None:
+    async def scenario() -> None:
+        assert cap == 42 // x
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=0, settings=FlipRequest(wager=50, x=x))
+            for joiner in players(cap - 1, first_id=12):
+                assert await flip.join(joiner, press_id=world.press()) is Notice.JOINED
+            assert flip.player_count == cap
+
+            assert await flip.join(player(30), press_id=world.press()) is Notice.LOBBY_FULL
+            assert flip.player_count == cap
+            assert player(30) not in flip.players
+
+    asyncio.run(scenario())
+
+
+def test_a_lobby_with_an_omitted_z_survives_losing_every_player() -> None:
+    async def scenario() -> None:
+        world = harness()
+        async with world.registry:
+            flip = await world.open_lobby(joiners=1, settings=_OMITTED)
+            assert await flip.leave(11, press_id=world.press()) is Notice.LEFT
+            assert await flip.leave(12, press_id=world.press()) is Notice.LEFT
+            assert flip.player_count == 0
+            assert flip.settings is None
+
+            last = world.gateway.edits[-1].view
+            assert isinstance(last, LobbyView)
+            assert last.players == ()
+            assert last.request == _OMITTED
+            assert not last.full
+
+            assert await flip.start(11, press_id=world.press()) is Notice.NEED_MORE_PLAYERS
+            assert _phase(flip) is FlipPhase.LOBBY
+            assert flip.settings is None
 
     asyncio.run(scenario())

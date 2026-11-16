@@ -34,7 +34,7 @@ from esgbot.engine import (
 )
 from esgbot.game import fairness
 from esgbot.game.deal import Deal, deal_cards
-from esgbot.game.rules import Settings
+from esgbot.game.rules import FlipRequest, Settings
 from esgbot.game.settlement import FlipOutcome, settle_deal
 from esgbot.storage import ActiveFlip, FinishedFlip, FlipState
 
@@ -579,13 +579,18 @@ class Harness:
         self,
         *,
         joiners: int = 1,
-        settings: Settings | None = None,
+        settings: Settings | FlipRequest | None = None,
         group_id: int | None = None,
         topic_id: int | None = None,
     ) -> Flip:
         """Open a lobby and join ``joiners`` more players after the starter.
 
         So ``joiners=1`` gives the two players a round needs.
+
+        ``settings`` is what the command asked for, as the registry takes it: a
+        :class:`~esgbot.game.rules.FlipRequest` for a flip that left ``Y`` or
+        ``Z`` to the bot, or plain :class:`~esgbot.game.rules.Settings` for one
+        that gave all four.
         """
         flip = await self.registry.create_flip(
             group_id=self.group_id if group_id is None else group_id,

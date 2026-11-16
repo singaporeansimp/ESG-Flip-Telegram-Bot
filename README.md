@@ -9,8 +9,13 @@ up to `Y` extra cards after the boards, and a scoop multiplier `Z` — and every
 one point. The player with the most points takes the pot; a player who takes all three points
 scoops and collects `wager × Z` from each other player.
 
+Only the wager and `X` have to be given. Leave `Y` out and every player gets as many extra cards
+as the deck can give them all; leave `Z` out and a scoop pays the wager once for every player at
+the table. `/again` repeats the group's last flip with the same command.
+
 > **Status.** The bot runs flips end to end: `/flip` opens a lobby, the round deals itself,
-> players peek privately, and the result is posted and recorded. `/leaderboard`, `/stats` and
+> players peek privately, and the result is posted and recorded. `/again` opens the same flip
+> again, and `/leaderboard`, `/stats` and
 > `/verify` read those recorded flips back, and [`deploy/`](deploy/) runs it as a service with
 > nightly backups — see [Deploying on a VPS](#deploying-on-a-vps). What is left is the live
 > check: a few real flips in a test group, which is the only way to see whether Telegram
@@ -94,13 +99,28 @@ the same topic, and a second `/flip` there is still refused while it runs.
 
 | Command | Does |
 | --- | --- |
-| `/flip <wager> <X> <Y> <Z>` | Opens a lobby, for example `/flip 50 5 2 3`. One flip per group at a time. |
+| `/flip <wager> <X> [<Y> [<Z>]]` | Opens a lobby, for example `/flip 50 5 2 3` or `/flip 50 5`. One flip per group at a time. |
+| `/again` | Opens a lobby with the settings of the last flip this group finished, written the same way. |
 | `/leaderboard` | The group's top twenty by net winnings, with flips played, win rate and scoops. |
 | `/stats` | Your own figures. `/stats @name`, or `/stats` as a reply to somebody's message, shows theirs. |
 | `/verify <flip number>` | Re-runs a finished flip against its seed and reports whether everything still matches. |
 
-The bot registers these four with Telegram on every start, so they appear when someone types `/` in a
+The bot registers these five with Telegram on every start, so they appear when someone types `/` in a
 chat with it. If Telegram refuses, the bot logs a warning and runs anyway; the commands still work typed out.
+
+`Y` and `Z` are optional and positional, so `Z` needs a `Y` in front of it: `/flip 50 5` leaves both
+out, `/flip 50 5 2` leaves `Z` out. A `Y` left out means **as many extra cards as the deck can give
+every player** — the deal never sends out a round it cannot complete, so this is not a promise of 21
+cards. A `Z` left out means **the number of players**, counted when Start locks the player list, so a
+scoop then pays the wager once for every player at the table. Until Start the lobby says so rather
+than showing a figure the next Join would change.
+
+`/again` repeats the last flip's **command**, not the figures it came to: a flip whose `Z` was left
+out is opened with `Z` left out again and settles on however many players turn up this time. Whoever
+types it opens the flip and is its first player — the last flip's players are not invited back. It
+obeys every `/flip` rule, so it is refused while a flip is open in the group. Only a flip that was
+recorded counts, so a lobby that was cancelled or a round that was voided is never "the last flip";
+in a group with no finished flips, `/again` says so and suggests `/flip`.
 
 The lobby's **Join**, **Leave**, **Start** and **Cancel** buttons run the rest. Only whoever
 opened the flip can Start or Cancel it, and a lobby closes itself after ten minutes with no joins
@@ -109,8 +129,9 @@ cards in a private pop-up — no direct chat with the bot needed. Peek works fro
 deck commitment is posted, so no hand is ever shown before the group has been told which deck it
 came from.
 
-All four commands belong in a group: flips, and the stats that come out of them, are kept per
-group, so the same person has separate figures in each one.
+All five commands belong in a group: flips, and the stats that come out of them, are kept per
+group, so the same person has separate figures in each one — and so is the last flip `/again`
+repeats, which is the last one that group finished and never another group's.
 
 ### Stats
 
@@ -179,7 +200,7 @@ secret here, and anyone holding it is the bot. Then:
   not optional: a flip is one message edited about fifteen times.
 - Leave privacy mode alone. Telegram's default keeps the bot from seeing ordinary chatter, and
   slash commands and button presses still reach it, which is all it asks for.
-- `/setcommands` with the four commands from [Commands](#commands) is optional and makes them
+- `/setcommands` with the five commands from [Commands](#commands) is optional and makes them
   appear in the group's menu.
 
 **4. The environment file.** Copy the example, then edit the token in:
@@ -274,6 +295,12 @@ refuses a file a newer one has written — the journal says `database schema ver
 than this version of the bot supports`. Going back a version therefore means restoring the
 backup as well.
 
+This version brings the database to **schema 2**, which adds the two flags a flip records about
+which settings were left out of its command, and the per-group row `/again` reads. The upgrade
+runs in one transaction on the first start and fills that row in from each group's most recent
+flip, so `/again` works in a group whose history predates it; flips recorded before the upgrade
+count as typed out in full, which is what they were.
+
 ### Restoring from a backup
 
 ```sh
@@ -333,7 +360,8 @@ esgbot/
                                                    (pure logic, no Telegram or SQLite)
   engine/        one flip's state machine, its timers, one flip per group
   telegram/      commands, rendering, buttons, gateway, startup sweep
-  storage/       SQLite schema, finished flips, flips in progress, stats queries
+  storage/       SQLite schema, finished flips, flips in progress, stats queries,
+                                                   each group's last flip settings
   verify.py      re-running a recorded flip against its seed, for /verify
   backup.py      an online copy of the database, for the backup timer
   tasks.py       awaiting work that cannot be called back once it has begun
@@ -357,7 +385,7 @@ What is in `esgbot/game`:
 | `cards` | `Card`, `Rank`, `Suit`, the stable 0..51 card index, `FULL_DECK`, card text |
 | `fairness` | `generate_seed`, `commitment`, `deck_order`, `button_seat`, seed hex helpers |
 | `deal` | `deal_cards`, the `Deal` and `PlayerHand` records, `seat_order`, JSON round-trip |
-| `rules` | `Settings`, the four settings' limits, `parse_settings`, `max_players` |
+| `rules` | `Settings` and `FlipRequest`, the four settings' limits and defaults, `parse_flip_request`, `max_players` |
 | `evaluator` | Five-card hand ranking and each player's best hand on a board |
 | `scoring` | A point per board, split among tied best hands, and the point totals |
 | `settlement` | The pot, the scoop rule, odd dollars in a chop, and who owes whom |
@@ -370,22 +398,26 @@ And in `esgbot/telegram`:
 | `render` | Every word the bot says. View data in, escaped HTML out, and nothing else. |
 | `keyboards` | The buttons, and the flip token their callback data carries |
 | `gateway` | The engine's output for real: flood-control waits, deleted messages, a group that has become a supergroup, giving up |
-| `handlers` | `/flip`, `/leaderboard`, `/stats`, `/verify`, button presses, and the group-to-supergroup migration |
+| `handlers` | `/flip`, `/again`, `/leaderboard`, `/stats`, `/verify`, button presses, and the group-to-supergroup migration |
 | `sweep` | Voiding the flips that were open when the bot last stopped |
 | `app` | Wiring it all together and long-polling |
 
 ## Settings and their limits
 
-| Setting | Meaning | Limits |
-| --- | --- | --- |
-| wager | Whole dollars each player puts in | 1 to 1,000,000 |
-| `X` | Hole cards dealt to each player | 5 to 21 |
-| `Y` | Maximum extra cards per player after both boards | 0 to 21 |
-| `Z` | Scoop multiplier (`1` means no bonus) | 1 to 100 |
+| Setting | Meaning | Limits | Left out of the command |
+| --- | --- | --- | --- |
+| wager | Whole dollars each player puts in | 1 to 1,000,000 | — (required) |
+| `X` | Hole cards dealt to each player | 5 to 21 | — (required) |
+| `Y` | Maximum extra cards per player after both boards | 0 to 21 | the maximum, 21, which deals as many as fit |
+| `Z` | Scoop multiplier (`1` means no bonus) | 1 to 100 | the number of players, fixed at Start |
 
 Settings are plain whole numbers written in digits only: `$50`, `5.0`, `1,000` and `-3` are
 rejected rather than guessed at. Two boards take ten of the 52 cards, which leaves 42 for the
 players, so at most `floor(42 / X)` players fit — eight at `X = 5`.
+
+A flip is recorded with the settings it played, all four of them, plus which of them were left out
+of the command. The figures are what `/verify` checks and what the money followed from; the two
+flags are only there so `/again` can repeat the command rather than the figures.
 
 ## Fairness
 

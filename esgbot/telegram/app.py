@@ -57,7 +57,8 @@ left on the server, which is also all the bot needs under Telegram's default
 privacy mode."""
 
 COMMANDS: Final = (
-    BotCommand(command="flip", description="Start a flip: /flip <wager> <X> <Y> <Z>"),
+    BotCommand(command="flip", description="Start a flip: /flip <wager> <X> [Y] [Z]"),
+    BotCommand(command="again", description="Repeat this group's last flip, same settings"),
     BotCommand(command="leaderboard", description="Top players in this group by net winnings"),
     BotCommand(command="stats", description="Your stats, or /stats @name, or reply to someone"),
     BotCommand(command="verify", description="Check a finished flip: /verify <flip number>"),

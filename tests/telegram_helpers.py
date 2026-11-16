@@ -40,6 +40,7 @@ from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message, Update, User
 
 from esgbot.engine import FlipRegistry, MessageTarget
+from esgbot.game.rules import FlipRequest
 from esgbot.storage import (
     DEFAULT_LEADERBOARD_LIMIT,
     ActiveFlip,
@@ -62,6 +63,7 @@ from tests.engine_helpers import GROUP, SETTINGS, FakeClock, FakeStore, settle_i
 
 __all__ = [
     "BOT_TOKEN",
+    "DEFAULT_REQUEST",
     "DEFAULT_SETTINGS",
     "GROUP",
     "STARTER",
@@ -421,6 +423,7 @@ class FakeDatabase(FakeStore):
     __slots__ = (
         "connection",
         "fetch_error",
+        "last_flip_error",
         "list_error",
         "migrate_error",
         "migrations",
@@ -435,6 +438,7 @@ class FakeDatabase(FakeStore):
         self.migrate_error: Exception | None = None
         self.stats_error: Exception | None = None
         self.fetch_error: Exception | None = None
+        self.last_flip_error: Exception | None = None
         self.migrations: list[tuple[int, int]] = []
 
     async def close(self) -> None:
@@ -491,6 +495,19 @@ class FakeDatabase(FakeStore):
         if self.fetch_error is not None:
             raise self.fetch_error
         return queries.fetch_flip(self.connection, group_id=group_id, flip_number=flip_number)
+
+    async def last_flip_request(self, group_id: int) -> FlipRequest | None:
+        """The settings of this group's last finished flip, as ``/again`` gets them.
+
+        Answered by the real query over the real ``group_last_flip`` row, which
+        :meth:`record_flip` wrote in the same transaction as the flip, so a test
+        that plays a flip and then types ``/again`` is reading what the bot
+        would read. ``last_flip_error`` is the failure that path is tested with.
+        """
+        await asyncio.sleep(0)
+        if self.last_flip_error is not None:
+            raise self.last_flip_error
+        return queries.last_flip_request(self.connection, group_id)
 
     # -------------------------------------------------------- the whole group
 
@@ -767,3 +784,6 @@ def active_row(
 
 DEFAULT_SETTINGS: Final = SETTINGS
 """The settings the helpers open flips with: ``/flip 50 5 2 3``."""
+
+DEFAULT_REQUEST: Final = FlipRequest.from_settings(SETTINGS)
+"""The same, as the request that command makes: every value given, nothing defaulted."""

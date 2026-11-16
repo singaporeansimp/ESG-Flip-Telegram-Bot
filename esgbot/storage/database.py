@@ -38,6 +38,7 @@ from os import PathLike
 from types import TracebackType
 from typing import Self, TypeVar
 
+from esgbot.game.rules import FlipRequest
 from esgbot.logging_setup import get_logger
 from esgbot.storage import queries, schema
 from esgbot.storage.models import (
@@ -167,6 +168,17 @@ class Database:
                 connection, group_id=group_id, flip_number=flip_number
             )
         )
+
+    async def last_flip_request(self, group_id: int) -> FlipRequest | None:
+        """What the last flip this group finished was asked for, or ``None``.
+
+        The settings as they were typed, which is what ``/again`` repeats: a
+        value the command left out comes back left out.
+
+        Raises:
+            CorruptRecordError: if the stored row will not read back.
+        """
+        return await self._run(lambda connection: queries.last_flip_request(connection, group_id))
 
     async def add_active_flip(self, active: ActiveFlip) -> None:
         """Write the row that says this flip is in progress."""

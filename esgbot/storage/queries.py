@@ -23,6 +23,13 @@ stays a float -- and ``int()`` would hand that back as a plausible 50. So every
 whole number is read with :func:`_whole`, which takes the stored type as it
 finds it and fails the row otherwise, and the figures a flip row repeats about
 its own deal are checked against the deal.
+
+A flip also stores which of its settings the command left to the bot, as one 0
+or 1 per value, and the group's own ``group_last_flip`` row holds the same
+settings and flags for the last flip it finished -- that row is what ``/again``
+reads, and :func:`record_flip` writes it in the same transaction as the flip
+that set it. On the way back out a flag is read as strictly as a number is: a
+column holding anything but 0 or 1 fails the row.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ from typing import Any, Final
 
 from esgbot.game.deal import Deal
 from esgbot.game.fairness import seed_from_hex, seed_to_hex
-from esgbot.game.rules import Settings
+from esgbot.game.rules import FlipRequest, Settings
 from esgbot.logging_setup import get_logger
 from esgbot.storage.errors import CorruptRecordError
 from esgbot.storage.models import (
@@ -54,6 +61,7 @@ __all__ = [
     "DEFAULT_LEADERBOARD_LIMIT",
     "add_active_flip",
     "fetch_flip",
+    "last_flip_request",
     "leaderboard",
     "list_active_flips",
     "migrate_group_id",
@@ -72,12 +80,38 @@ _logger = get_logger(__name__)
 
 _INSERT_FLIP: Final = """
 INSERT INTO flips (
-    group_id, wager, x, y, z, player_count, button_seat,
+    group_id, wager, x, y, z, y_defaulted, z_defaulted, player_count, button_seat,
     seed, commitment, deal, started_at, finished_at
 ) VALUES (
-    :group_id, :wager, :x, :y, :z, :player_count, :button_seat,
+    :group_id, :wager, :x, :y, :z, :y_defaulted, :z_defaulted, :player_count, :button_seat,
     :seed, :commitment, :deal, :started_at, :finished_at
 )
+"""
+
+# One row per group, replaced by every flip that group finishes: the settings as
+# they were typed, which is what ``/again`` repeats. ``updated_at`` is the flip's
+# own finishing time, so the row says when it was last set -- which is what
+# decides the merge if a group that already has one is given a new id.
+_UPSERT_LAST_FLIP: Final = """
+INSERT INTO group_last_flip (
+    group_id, wager, x, y, z, y_defaulted, z_defaulted, updated_at
+) VALUES (
+    :group_id, :wager, :x, :y, :z, :y_defaulted, :z_defaulted, :updated_at
+)
+ON CONFLICT(group_id) DO UPDATE SET
+    wager = excluded.wager,
+    x = excluded.x,
+    y = excluded.y,
+    z = excluded.z,
+    y_defaulted = excluded.y_defaulted,
+    z_defaulted = excluded.z_defaulted,
+    updated_at = excluded.updated_at
+"""
+
+_SELECT_LAST_FLIP: Final = """
+SELECT wager, x, y, z, y_defaulted, z_defaulted
+FROM group_last_flip
+WHERE group_id = :group_id
 """
 
 _INSERT_PLAYER: Final = """
@@ -89,8 +123,8 @@ INSERT INTO flip_players (
 """
 
 _SELECT_FLIP: Final = """
-SELECT flip_number, group_id, wager, x, y, z, player_count, button_seat,
-       seed, commitment, deal, started_at, finished_at
+SELECT flip_number, group_id, wager, x, y, z, y_defaulted, z_defaulted,
+       player_count, button_seat, seed, commitment, deal, started_at, finished_at
 FROM flips
 WHERE group_id = :group_id AND flip_number = :flip_number
 """
@@ -209,6 +243,11 @@ def record_flip(
     row -- nothing is deleted then, and a token whose row has already gone is
     not an error either.
 
+    The group's ``group_last_flip`` row is written in that same transaction, so
+    the settings ``/again`` repeats are always a flip this group really
+    finished: a write that fails leaves the old row exactly as it was, and a
+    cancelled or voided flip, which is never recorded at all, never touches it.
+
     Usernames are stored in the normalised form of
     :func:`~esgbot.storage.models.normalize_username`.
 
@@ -217,15 +256,20 @@ def record_flip(
             there was one, is still there. The caller still has a result to
             post; the Tech Plan has it say the flip was not recorded.
     """
+    settings = {
+        "wager": flip.settings.wager,
+        "x": flip.settings.x,
+        "y": flip.settings.y,
+        "z": flip.settings.z,
+        "y_defaulted": int(flip.y_defaulted),
+        "z_defaulted": int(flip.z_defaulted),
+    }
     with transaction(connection):
         cursor = connection.execute(
             _INSERT_FLIP,
             {
                 "group_id": flip.group_id,
-                "wager": flip.settings.wager,
-                "x": flip.settings.x,
-                "y": flip.settings.y,
-                "z": flip.settings.z,
+                **settings,
                 "player_count": flip.player_count,
                 "button_seat": flip.button_seat,
                 "seed": seed_to_hex(flip.seed),
@@ -253,6 +297,14 @@ def record_flip(
                 }
                 for player in flip.players
             ],
+        )
+        connection.execute(
+            _UPSERT_LAST_FLIP,
+            {
+                "group_id": flip.group_id,
+                **settings,
+                "updated_at": _time_to_text(flip.finished_at),
+            },
         )
         if token is not None:
             connection.execute(_DELETE_ACTIVE, {"token": token})
@@ -290,6 +342,39 @@ def fetch_flip(
             _SELECT_FLIP_PLAYERS, {"flip_number": flip_number}
         ).fetchall()
     return _stored_flip(row, player_rows)
+
+
+def last_flip_request(connection: sqlite3.Connection, group_id: int) -> FlipRequest | None:
+    """What the last flip this group finished was asked for, for ``/again``.
+
+    The settings as they were typed: a ``Y`` or ``Z`` the command left out comes
+    back left out, so repeating the request fills it in again for whoever is at
+    the table this time. The figure beside a flag is what that value was filled
+    in with at the time and is not read.
+
+    Groups never mix: this is one row per group, written by the flips that group
+    finished and by nothing else.
+
+    Returns:
+        The request, or ``None`` if this group has never finished a flip.
+
+    Raises:
+        CorruptRecordError: if the row is there but will not read back.
+    """
+    row = connection.execute(_SELECT_LAST_FLIP, {"group_id": group_id}).fetchone()
+    if row is None:
+        return None
+    try:
+        settings = _settings_from(row)
+        return FlipRequest.from_settings(
+            settings,
+            y_defaulted=_flag(row["y_defaulted"], "y_defaulted"),
+            z_defaulted=_flag(row["z_defaulted"], "z_defaulted"),
+        )
+    except (ValueError, TypeError) as error:
+        record = f"the last flip settings of group {group_id}"
+        _logger.warning("%s cannot be read back: %s", record, error)
+        raise CorruptRecordError(record, str(error)) from error
 
 
 def add_active_flip(connection: sqlite3.Connection, active: ActiveFlip) -> None:
@@ -470,12 +555,22 @@ def migrate_group_id(
 ) -> GroupMigration:
     """Move a group's history and in-progress flips to its new id.
 
-    Telegram changes the id when a group becomes a supergroup. Both tables move in
-    one transaction, so stats and any open flip stay together.
+    Telegram changes the id when a group becomes a supergroup. All three tables
+    move in one transaction, so stats, any open flip and the settings ``/again``
+    repeats stay together.
+
+    The last-flip row is one per group, so the two ids could in principle each
+    have one. **The more recently set of the two is kept**, and a tie keeps the
+    new id's: a group that has been playing under the new id already has the
+    newer history, and whatever the old id was holding is the older fact. In
+    practice Telegram migrates a group to an id nothing has used, so this does
+    not arise; it is written down because a rule nobody can state is worse than
+    the clash it covers.
 
     Returns:
-        How many rows moved in each table. Both are zero when the two ids are the
-        same, which is a no-op rather than an error.
+        How many rows moved in ``flips`` and ``active_flips``. Both are zero when
+        the two ids are the same, which is a no-op rather than an error. The
+        last-flip row is one row either way and is not counted.
     """
     if old_group_id == new_group_id:
         return GroupMigration(flips=0, active_flips=0)
@@ -487,6 +582,7 @@ def migrate_group_id(
         actives = connection.execute(
             "UPDATE active_flips SET group_id = :new WHERE group_id = :old", parameters
         ).rowcount
+        _move_last_flip(connection, parameters)
     migration = GroupMigration(flips=flips, active_flips=actives)
     if migration.rows:
         _logger.info(
@@ -497,6 +593,36 @@ def migrate_group_id(
             migration.active_flips,
         )
     return migration
+
+
+def _move_last_flip(connection: sqlite3.Connection, parameters: Mapping[str, int]) -> None:
+    """Move one group's last-flip row to its new id, keeping the newer of a clash.
+
+    Three statements, in this order, so that whichever row is kept is the only
+    one left to move: drop the new id's row if the old id's is strictly newer,
+    then drop the old id's if anything is still sitting at the new id, then move
+    what remains. The times are ISO-8601 UTC, which sorts chronologically as
+    text, and a missing row makes the comparison ``NULL`` so nothing is dropped.
+    """
+    connection.execute(
+        """
+        DELETE FROM group_last_flip
+        WHERE group_id = :new
+          AND updated_at < (SELECT updated_at FROM group_last_flip WHERE group_id = :old)
+        """,
+        parameters,
+    )
+    connection.execute(
+        """
+        DELETE FROM group_last_flip
+        WHERE group_id = :old
+          AND EXISTS (SELECT 1 FROM group_last_flip AS kept WHERE kept.group_id = :new)
+        """,
+        parameters,
+    )
+    connection.execute(
+        "UPDATE group_last_flip SET group_id = :new WHERE group_id = :old", parameters
+    )
 
 
 def _rank_key(stats: PlayerStats) -> tuple[int, int, str, str, int]:
@@ -550,15 +676,30 @@ def _dollars_from(value: object) -> int:
     return _whole(value, "net_dollars")
 
 
-def _scooped_from(value: object) -> bool:
-    """Whether this player scooped: the 0 or 1 that is stored, and nothing else.
+def _flag(value: object, label: str) -> bool:
+    """One stored yes-or-no: the 0 or 1 that is in the column, and nothing else.
 
     ``bool`` would read text, or any number at all, as an answer, so a damaged
-    flag would come back as a scoop rather than as the damage it is.
+    flag would come back as a yes rather than as the damage it is.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 1):
-        raise ValueError(f"scooped must be 0 or 1, got {value!r}")
+        raise ValueError(f"{label} must be 0 or 1, got {value!r}")
     return bool(value)
+
+
+def _scooped_from(value: object) -> bool:
+    """Whether this player scooped, as it is stored."""
+    return _flag(value, "scooped")
+
+
+def _settings_from(row: Mapping[str, Any]) -> Settings:
+    """The four settings out of any row that holds them, limits checked again."""
+    return Settings(
+        wager=_whole(row["wager"], "wager"),
+        x=_whole(row["x"], "x"),
+        y=_whole(row["y"], "y"),
+        z=_whole(row["z"], "z"),
+    )
 
 
 def _player_stats(row: Mapping[str, Any], group_id: int) -> PlayerStats:
@@ -631,12 +772,9 @@ def _stored_flip(row: Mapping[str, Any], player_rows: Sequence[Mapping[str, Any]
         button_seat = _whole(row["button_seat"], "button_seat")
         flip = FinishedFlip(
             group_id=_whole(row["group_id"], "group_id"),
-            settings=Settings(
-                wager=_whole(row["wager"], "wager"),
-                x=_whole(row["x"], "x"),
-                y=_whole(row["y"], "y"),
-                z=_whole(row["z"], "z"),
-            ),
+            settings=_settings_from(row),
+            y_defaulted=_flag(row["y_defaulted"], "y_defaulted"),
+            z_defaulted=_flag(row["z_defaulted"], "z_defaulted"),
             seed=seed_from_hex(str(row["seed"])),
             commitment=str(row["commitment"]),
             deal=Deal.from_json(str(row["deal"])),

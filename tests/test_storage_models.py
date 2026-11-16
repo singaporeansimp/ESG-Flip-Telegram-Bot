@@ -6,7 +6,7 @@ from fractions import Fraction
 
 import pytest
 
-from esgbot.game.rules import Settings
+from esgbot.game.rules import Y_DEFAULT, FlipRequest, Settings
 from esgbot.storage import ActiveFlip, FinishedFlip, FlipPlayer, FlipState, PlayerStats, StoredFlip
 from tests.storage_helpers import EPOCH, Line, make_flip
 
@@ -102,3 +102,53 @@ def test_player_active_and_stats_validation() -> None:
 def test_flip_state_values() -> None:
     assert FlipState.LOBBY.value == "lobby"
     assert FlipState.RUNNING.value == "running"
+
+
+def with_settings(
+    settings: Settings, *, y_defaulted: bool = False, z_defaulted: bool = False
+) -> FinishedFlip:
+    flip = make_flip(-1, LINES[:2], seed_byte=1, settings=settings)
+    return replace(flip, y_defaulted=y_defaulted, z_defaulted=z_defaulted)
+
+
+def test_a_flip_is_typed_out_in_full_unless_it_says_otherwise() -> None:
+    flip = good()
+    assert flip.y_defaulted is False
+    assert flip.z_defaulted is False
+    assert flip.request == FlipRequest(50, 5, 2, 3)
+
+
+@pytest.mark.parametrize(
+    ("y_defaulted", "z_defaulted"), [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_the_flags_travel_and_the_request_drops_what_was_defaulted(
+    y_defaulted: bool, z_defaulted: bool
+) -> None:
+    settings = Settings(wager=50, x=5, y=Y_DEFAULT if y_defaulted else 4, z=2 if z_defaulted else 9)
+    flip = with_settings(settings, y_defaulted=y_defaulted, z_defaulted=z_defaulted)
+    assert flip.y_defaulted is y_defaulted
+    assert flip.z_defaulted is z_defaulted
+    assert flip.settings == settings
+    assert flip.request == FlipRequest(
+        50, 5, None if y_defaulted else 4, None if z_defaulted else 9
+    )
+
+
+def test_a_defaulted_y_must_be_the_default() -> None:
+    with pytest.raises(ValueError, match="Y was left out"):
+        with_settings(Settings(wager=50, x=5, y=20, z=2), y_defaulted=True)
+
+
+def test_a_defaulted_z_must_be_the_player_count() -> None:
+    with pytest.raises(ValueError, match="Z was left out"):
+        with_settings(Settings(wager=50, x=5, y=2, z=3), z_defaulted=True)  # two players
+    with pytest.raises(ValueError, match="Z was left out"):
+        replace(good(), z_defaulted=True, settings=Settings(wager=50, x=5, y=2, z=2))  # three
+
+
+def test_the_flags_not_the_numbers_decide_what_was_defaulted() -> None:
+    # y is 21 and z is the player count, but both were typed out.
+    flip = with_settings(Settings(wager=50, x=5, y=Y_DEFAULT, z=2))
+    assert flip.request == FlipRequest(50, 5, Y_DEFAULT, 2)
+    assert flip.request.y_defaulted is False
+    assert flip.request.z_defaulted is False

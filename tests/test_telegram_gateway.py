@@ -32,6 +32,7 @@ from esgbot.engine import (
     TableView,
 )
 from esgbot.game.cards import Card
+from esgbot.game.rules import FlipRequest
 from esgbot.telegram.gateway import (
     FLOOD_RETRIES,
     MIGRATIONS_FOLLOWED,
@@ -61,7 +62,7 @@ _NEW_CHAT = -1009999
 def _lobby(status: LobbyStatus = LobbyStatus.OPEN) -> LobbyView:
     return LobbyView(
         token="tok",
-        settings=SETTINGS,
+        request=FlipRequest.from_settings(SETTINGS),
         status=status,
         starter=player(11),
         players=players(2),

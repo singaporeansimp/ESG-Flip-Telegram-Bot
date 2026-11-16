@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -10,12 +11,14 @@ from pathlib import Path
 import pytest
 
 from esgbot.game import fairness
+from esgbot.game.rules import Y_DEFAULT, FlipRequest, Settings
 from esgbot.storage import (
     DEFAULT_LEADERBOARD_LIMIT,
     SCHEMA_VERSION,
     ActiveFlip,
     CorruptRecordError,
     Database,
+    FinishedFlip,
     FlipState,
     GroupMigration,
     PlayerStats,
@@ -24,6 +27,7 @@ from esgbot.storage import (
     normalize_username,
     schema,
 )
+from esgbot.storage.schema import _MIGRATION_1
 from tests.storage_helpers import EPOCH, Line, count_rows, make_flip, sync_connection
 
 GROUP_A = -1001
@@ -1122,7 +1126,7 @@ def test_new_database_is_at_current_schema_version(tmp_path: Path) -> None:
     asyncio.run(scenario())
     connection = sync_connection(path)
     try:
-        assert schema.schema_version(connection) == SCHEMA_VERSION == 1
+        assert schema.schema_version(connection) == SCHEMA_VERSION == 2
         assert schema.apply_migrations(connection) == SCHEMA_VERSION  # idempotent
     finally:
         connection.close()
@@ -1209,3 +1213,515 @@ def test_stored_values_are_in_normalised_and_utc_form(tmp_path: Path) -> None:
         assert started.endswith("+00:00")
     finally:
         connection.close()
+
+
+# --- The last flip's settings, for /again ---------------------------------------
+
+PAIR = [Line(ALICE, "Alice", 50), Line(BOB, "Bob", -50)]
+TRIO = [Line(ALICE, "Alice", 50), Line(BOB, "Bob", -25), Line(CARA, "Cara", -25)]
+
+
+def request_flip(
+    group_id: int,
+    settings: Settings,
+    *,
+    seed_byte: int,
+    y_defaulted: bool = False,
+    z_defaulted: bool = False,
+    lines: list[Line] | None = None,
+    started_at: datetime = EPOCH,
+) -> FinishedFlip:
+    """A genuine flip whose settings were (or were not) filled in by the bot."""
+    flip = make_flip(
+        group_id,
+        PAIR if lines is None else lines,
+        seed_byte=seed_byte,
+        settings=settings,
+        started_at=started_at,
+    )
+    return replace(flip, y_defaulted=y_defaulted, z_defaulted=z_defaulted)
+
+
+def last_row(path: Path, group_id: int) -> tuple[object, ...] | None:
+    connection = sync_connection(path)
+    try:
+        row = connection.execute(
+            "SELECT wager, x, y, z, y_defaulted, z_defaulted, updated_at "
+            "FROM group_last_flip WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+        return None if row is None else tuple(row)
+    finally:
+        connection.close()
+
+
+def v1_database(path: Path) -> sqlite3.Connection:
+    """A file exactly as version 1 left it, ready for raw inserts."""
+    connection = schema.connect(path)
+    for statement in _MIGRATION_1:
+        connection.execute(statement)
+    connection.execute("PRAGMA user_version = 1")
+    return connection
+
+
+V1_SEED = "ab" * fairness.SEED_SIZE
+V1_COMMITMENT = "cd" * 32
+
+
+def v1_flip(
+    connection: sqlite3.Connection,
+    group_id: int,
+    settings: tuple[int, int, int, int],
+    finished_at: str,
+    players: tuple[int, ...] = (ALICE, BOB),
+) -> int:
+    wager, x, y, z = settings
+    cursor = connection.execute(
+        "INSERT INTO flips (group_id, wager, x, y, z, player_count, button_seat, seed, "
+        "commitment, deal, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, '{}', ?, ?)",
+        (
+            group_id,
+            wager,
+            x,
+            y,
+            z,
+            len(players),
+            V1_SEED,
+            V1_COMMITMENT,
+            "2026-01-01T00:00:00+00:00",
+            finished_at,
+        ),
+    )
+    number = cursor.lastrowid
+    assert number is not None
+    for seat, user_id in enumerate(players):
+        connection.execute(
+            "INSERT INTO flip_players VALUES (?, ?, ?, NULL, ?, '1', 0, 0)",
+            (number, user_id, f"user{user_id}", seat),
+        )
+    return number
+
+
+def dump(path: Path) -> dict[str, list[tuple[object, ...]]]:
+    connection = sync_connection(path)
+    try:
+        return {
+            "flips": [
+                tuple(r)
+                for r in connection.execute(
+                    "SELECT flip_number, group_id, wager, x, y, z, player_count, button_seat, "
+                    "seed, commitment, deal, started_at, finished_at FROM flips ORDER BY 1"
+                )
+            ],
+            "players": [
+                tuple(r) for r in connection.execute("SELECT * FROM flip_players ORDER BY 1, 4")
+            ],
+        }
+    finally:
+        connection.close()
+
+
+def test_a_version_one_file_is_stepped_up_to_version_two(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    connection = v1_database(path)
+    v1_flip(connection, GROUP_A, (50, 5, 2, 3), "2026-01-01T10:00:00+00:00")
+    v1_flip(connection, GROUP_A, (20, 7, 6, 9), "2026-01-02T10:00:00+00:00", (ALICE, BOB, CARA))
+    v1_flip(connection, GROUP_B, (10, 5, 1, 1), "2026-01-03T10:00:00+00:00")
+    v1_flip(connection, GROUP_B, (30, 6, 7, 2), "2026-01-01T09:00:00+00:00")
+    connection.close()
+    before = dump(path)
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(20, 7, 6, 9)
+            # The newest flip number wins, not the latest finished_at.
+            assert await db.last_flip_request(GROUP_B) == FlipRequest(30, 6, 7, 2)
+            assert await db.last_flip_request(-5) is None
+
+    asyncio.run(scenario())
+
+    connection = sync_connection(path)
+    try:
+        assert schema.schema_version(connection) == 2
+        assert connection.execute("SELECT COUNT(*) FROM group_last_flip").fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM flips WHERE y_defaulted <> 0 OR z_defaulted <> 0"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        connection.close()
+    assert dump(path) == before
+    assert last_row(path, GROUP_A) == (20, 7, 6, 9, 0, 0, "2026-01-02T10:00:00+00:00")
+    assert last_row(path, GROUP_B) == (30, 6, 7, 2, 0, 0, "2026-01-01T09:00:00+00:00")
+
+
+def test_the_upgraded_flips_read_back_as_typed_in_full(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    connection = v1_database(path)
+    number = v1_flip(connection, GROUP_A, (50, 5, 2, 3), "2026-01-01T10:00:00+00:00")
+    connection.close()
+    connection = schema.connect(path)
+    try:
+        schema.apply_migrations(connection)
+        row = connection.execute(
+            "SELECT y_defaulted, z_defaulted FROM flips WHERE flip_number = ?", (number,)
+        ).fetchone()
+        assert tuple(row) == (0, 0)
+    finally:
+        connection.close()
+
+
+def test_a_version_one_file_without_flips_gets_an_empty_last_flip_table(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    v1_database(path).close()
+    connection = schema.connect(path)
+    try:
+        assert schema.apply_migrations(connection) == 2
+        assert connection.execute("SELECT COUNT(*) FROM group_last_flip").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_the_upgrade_is_idempotent_and_a_current_file_is_left_alone(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    connection = v1_database(path)
+    v1_flip(connection, GROUP_A, (50, 5, 2, 3), "2026-01-01T10:00:00+00:00")
+    connection.close()
+    connection = schema.connect(path)
+    try:
+        assert schema.apply_migrations(connection) == 2
+        # Someone changes the row after the upgrade; a second run must not rebuild it.
+        connection.execute("UPDATE group_last_flip SET wager = 99")
+        master = connection.execute("SELECT * FROM sqlite_master ORDER BY name").fetchall()
+        assert schema.apply_migrations(connection) == 2
+        assert schema.schema_version(connection) == 2
+        assert connection.execute("SELECT wager FROM group_last_flip").fetchone()[0] == 99
+        assert connection.execute("SELECT * FROM sqlite_master ORDER BY name").fetchall() == master
+        assert connection.execute("SELECT COUNT(*) FROM flips").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_a_fresh_file_and_an_upgraded_file_have_the_same_schema(tmp_path: Path) -> None:
+    fresh = schema.connect(tmp_path / "fresh.db")
+    upgraded = v1_database(tmp_path / "old.db")
+    try:
+        assert schema.apply_migrations(fresh) == 2
+        assert schema.apply_migrations(upgraded) == 2
+        query = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+        assert [tuple(r) for r in fresh.execute(query)] == [
+            tuple(r) for r in upgraded.execute(query)
+        ]
+        for table in ("flips", "group_last_flip"):
+            columns = [tuple(r) for r in fresh.execute(f"PRAGMA table_info({table})")]
+            assert columns == [tuple(r) for r in upgraded.execute(f"PRAGMA table_info({table})")]
+        assert "y_defaulted" in {r["name"] for r in fresh.execute("PRAGMA table_info(flips)")}
+    finally:
+        fresh.close()
+        upgraded.close()
+
+
+@pytest.mark.parametrize(
+    ("y_defaulted", "z_defaulted"), [(True, True), (True, False), (False, True), (False, False)]
+)
+def test_the_defaulted_flags_round_trip(
+    tmp_path: Path, y_defaulted: bool, z_defaulted: bool
+) -> None:
+    settings = Settings(wager=50, x=5, y=Y_DEFAULT if y_defaulted else 3, z=3 if z_defaulted else 7)
+    flip = request_flip(
+        GROUP_A,
+        settings,
+        seed_byte=1,
+        y_defaulted=y_defaulted,
+        z_defaulted=z_defaulted,
+        lines=TRIO,
+    )
+
+    async def scenario() -> None:
+        async with await Database.open(tmp_path / "bot.db") as db:
+            number = await db.record_flip(flip)
+            stored = await db.fetch_flip(group_id=GROUP_A, flip_number=number)
+            assert stored is not None
+            assert stored.flip == flip
+            assert stored.flip.y_defaulted is y_defaulted
+            assert stored.flip.z_defaulted is z_defaulted
+            assert stored.flip.settings == settings
+            expected = FlipRequest(50, 5, None if y_defaulted else 3, None if z_defaulted else 7)
+            assert stored.flip.request == expected
+            assert await db.last_flip_request(GROUP_A) == expected
+
+    asyncio.run(scenario())
+
+    connection = sync_connection(tmp_path / "bot.db")
+    try:
+        row = connection.execute("SELECT y, z, y_defaulted, z_defaulted FROM flips").fetchone()
+        assert tuple(row) == (settings.y, settings.z, int(y_defaulted), int(z_defaulted))
+    finally:
+        connection.close()
+
+
+def test_a_group_that_never_finished_a_flip_has_no_last_request(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with await Database.open(tmp_path / "bot.db") as db:
+            assert await db.last_flip_request(GROUP_A) is None
+            await db.record_flip(request_flip(GROUP_B, SETTINGS_ONE, seed_byte=1))
+            assert await db.last_flip_request(GROUP_A) is None
+
+    asyncio.run(scenario())
+
+
+SETTINGS_ONE = Settings(wager=50, x=5, y=2, z=3)
+SETTINGS_TWO = Settings(wager=10, x=6, y=1, z=8)
+
+
+def test_the_last_request_is_the_newest_flip_even_when_settings_change(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with await Database.open(tmp_path / "bot.db") as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(50, 5, 2, 3)
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=2))
+            await db.record_flip(
+                request_flip(GROUP_A, SETTINGS_TWO, seed_byte=3, started_at=EPOCH + timedelta(1))
+            )
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(10, 6, 1, 8)
+            # Back to a defaulted one: the request forgets the figures.
+            await db.record_flip(
+                request_flip(
+                    GROUP_A,
+                    Settings(wager=10, x=6, y=Y_DEFAULT, z=2),
+                    seed_byte=4,
+                    y_defaulted=True,
+                    z_defaulted=True,
+                )
+            )
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(10, 6)
+
+    asyncio.run(scenario())
+    assert count_rows(tmp_path / "bot.db", "group_last_flip") == 1
+
+
+def test_last_requests_are_kept_per_group(tmp_path: Path) -> None:
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+            await db.record_flip(request_flip(GROUP_B, SETTINGS_TWO, seed_byte=2))
+            row_b = last_row(path, GROUP_B)
+            await db.record_flip(
+                request_flip(
+                    GROUP_A,
+                    Settings(wager=70, x=6, y=Y_DEFAULT, z=2),
+                    seed_byte=3,
+                    y_defaulted=True,
+                )
+            )
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(70, 6, None, 2)
+            assert await db.last_flip_request(GROUP_B) == FlipRequest(10, 6, 1, 8)
+            assert last_row(path, GROUP_B) == row_b
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 2
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE group_last_flip SET y_defaulted = 'yes'",
+        "UPDATE group_last_flip SET z_defaulted = 7",
+        "UPDATE group_last_flip SET z_defaulted = 1.5",
+        "UPDATE group_last_flip SET wager = 'lots'",
+        "UPDATE group_last_flip SET x = 0",
+    ],
+)
+def test_a_damaged_last_flip_row_raises_corrupt_record_error(
+    tmp_path: Path, statement: str
+) -> None:
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+        tamper(path, statement)
+        async with await Database.open(path) as db:
+            with pytest.raises(CorruptRecordError) as caught:
+                await db.last_flip_request(GROUP_A)
+            assert caught.value.record == f"the last flip settings of group {GROUP_A}"
+            assert await db.last_flip_request(GROUP_B) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("column", ["y_defaulted", "z_defaulted"])
+def test_a_damaged_flag_on_a_flip_raises_corrupt_record_error(tmp_path: Path, column: str) -> None:
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            number = await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+        tamper(path, f"UPDATE flips SET {column} = 7")
+        async with await Database.open(path) as db:
+            with pytest.raises(CorruptRecordError):
+                await db.fetch_flip(group_id=GROUP_A, flip_number=number)
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_record_leaves_the_last_flip_row_as_it_was(tmp_path: Path) -> None:
+    path = tmp_path / "bot.db"
+    good = request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1, started_at=EPOCH)
+    bad = request_flip(
+        GROUP_A,
+        SETTINGS_TWO,
+        seed_byte=2,
+        lines=[Line(ALICE, "Alice", 10), Line(BOB, "Bob", 2**63)],
+        started_at=EPOCH + timedelta(days=1),
+    )
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(good)
+            row = last_row(path, GROUP_A)
+            assert row is not None
+
+            with pytest.raises(OverflowError):
+                await db.record_flip(bad)
+
+            assert last_row(path, GROUP_A) == row
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(50, 5, 2, 3)
+            assert count_rows(path, "flips") == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_first_record_leaves_no_last_flip_row(tmp_path: Path) -> None:
+    path = tmp_path / "bot.db"
+    bad = request_flip(
+        GROUP_A,
+        SETTINGS_ONE,
+        seed_byte=2,
+        lines=[Line(ALICE, "Alice", 10), Line(BOB, "Bob", 2**63)],
+    )
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            with pytest.raises(OverflowError):
+                await db.record_flip(bad)
+            assert await db.last_flip_request(GROUP_A) is None
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 0
+
+
+def test_only_recording_a_flip_writes_the_last_flip_row(tmp_path: Path) -> None:
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            # A flip that is opened, then cancelled or voided, is never recorded.
+            await db.add_active_flip(active("tok", GROUP_A))
+            await db.update_active_flip("tok", state=FlipState.RUNNING)
+            await db.remove_active_flip("tok")
+            assert await db.last_flip_request(GROUP_A) is None
+            assert count_rows(path, "group_last_flip") == 0
+
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+            row = last_row(path, GROUP_A)
+            await db.add_active_flip(active("tok2", GROUP_A))
+            await db.remove_active_flip("tok2")
+            assert last_row(path, GROUP_A) == row
+
+    asyncio.run(scenario())
+
+
+def test_migrate_group_id_moves_the_last_flip_row(tmp_path: Path) -> None:
+    path = tmp_path / "bot.db"
+    new_id = -1009999
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_A, SETTINGS_ONE, seed_byte=1))
+            await db.record_flip(request_flip(GROUP_B, SETTINGS_TWO, seed_byte=2))
+            row = last_row(path, GROUP_A)
+
+            result = await db.migrate_group_id(old_group_id=GROUP_A, new_group_id=new_id)
+            assert result == GroupMigration(flips=1, active_flips=0)
+
+            assert await db.last_flip_request(GROUP_A) is None
+            assert await db.last_flip_request(new_id) == FlipRequest(50, 5, 2, 3)
+            assert await db.last_flip_request(GROUP_B) == FlipRequest(10, 6, 1, 8)
+            assert last_row(path, new_id) == row
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 2
+
+
+def test_migrate_group_id_with_no_last_flip_row_or_the_same_id_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bot.db"
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(request_flip(GROUP_B, SETTINGS_TWO, seed_byte=2))
+            nothing = await db.migrate_group_id(old_group_id=GROUP_A, new_group_id=-77)
+            assert nothing == GroupMigration(0, 0)
+            assert await db.last_flip_request(-77) is None
+            assert await db.last_flip_request(GROUP_A) is None
+
+            same = await db.migrate_group_id(old_group_id=GROUP_B, new_group_id=GROUP_B)
+            assert same == GroupMigration(0, 0)
+            assert await db.last_flip_request(GROUP_B) == FlipRequest(10, 6, 1, 8)
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 1
+
+
+@pytest.mark.parametrize(
+    ("old_offset", "new_offset", "kept_old"),
+    [(2, 1, True), (1, 2, False), (1, 1, False)],
+    ids=["old-newer", "new-newer", "tie-keeps-new"],
+)
+def test_migrate_group_id_keeps_the_newer_of_two_last_flip_rows(
+    tmp_path: Path, old_offset: int, new_offset: int, kept_old: bool
+) -> None:
+    path = tmp_path / "bot.db"
+    new_id = -2002
+
+    async def scenario() -> None:
+        async with await Database.open(path) as db:
+            await db.record_flip(
+                request_flip(
+                    GROUP_A, SETTINGS_ONE, seed_byte=1, started_at=EPOCH + timedelta(old_offset)
+                )
+            )
+            await db.record_flip(
+                request_flip(
+                    new_id, SETTINGS_TWO, seed_byte=2, started_at=EPOCH + timedelta(new_offset)
+                )
+            )
+            result = await db.migrate_group_id(old_group_id=GROUP_A, new_group_id=new_id)
+            assert result == GroupMigration(flips=1, active_flips=0)
+
+            assert await db.last_flip_request(GROUP_A) is None
+            expected = FlipRequest(50, 5, 2, 3) if kept_old else FlipRequest(10, 6, 1, 8)
+            assert await db.last_flip_request(new_id) == expected
+
+    asyncio.run(scenario())
+    assert count_rows(path, "group_last_flip") == 1
+
+
+def test_the_async_database_exposes_the_last_flip_request(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with await Database.open(tmp_path / "bot.db") as db:
+            assert await db.last_flip_request(GROUP_A) is None
+            await db.record_flip(
+                request_flip(
+                    GROUP_A, Settings(wager=5, x=5, y=Y_DEFAULT, z=2), seed_byte=1, y_defaulted=True
+                )
+            )
+            assert await db.last_flip_request(GROUP_A) == FlipRequest(5, 5, None, 2)
+
+    asyncio.run(scenario())

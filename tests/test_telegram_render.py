@@ -40,9 +40,18 @@ from esgbot.game import fairness
 from esgbot.game.cards import Card, Rank, Suit, format_cards
 from esgbot.game.rules import (
     MIN_PLAYERS,
+    WAGER_MAX,
+    WAGER_MIN,
+    X_MAX,
+    X_MIN,
+    Y_MAX,
+    Y_MIN,
+    Z_MAX,
+    Z_MIN,
+    FlipRequest,
     Settings,
     SettingsError,
-    parse_settings_tokens,
+    parse_flip_request,
 )
 from esgbot.game.scoring import Board
 from esgbot.game.settlement import FlipOutcome
@@ -55,6 +64,7 @@ from tests.engine_helpers import (
 )
 
 SETTINGS = Settings(wager=50, x=5, y=2, z=3)
+REQUEST = FlipRequest.from_settings(SETTINGS)
 PLAYER_IDS = [11, 12, 13]
 EVIL = "<b>Ev&il</b> \"Bob\" <script>alert('x')</script>"
 EVIL_ESCAPED = "&lt;b&gt;Ev&amp;il&lt;/b&gt;"
@@ -70,13 +80,11 @@ def _lobby(
     count: int,
     *,
     status: LobbyStatus = LobbyStatus.OPEN,
-    settings: Settings = SETTINGS,
+    request: FlipRequest = REQUEST,
     names: tuple[Player, ...] | None = None,
 ) -> LobbyView:
     roster = names if names is not None else players(count)
-    return LobbyView(
-        token="tok", settings=settings, status=status, starter=roster[0], players=roster
-    )
+    return LobbyView(token="tok", request=request, status=status, starter=roster[0], players=roster)
 
 
 def _table(
@@ -177,7 +185,7 @@ def test_an_open_lobby_shows_settings_cap_roster_and_starter() -> None:
 
 
 def test_the_player_cap_is_forty_two_over_x() -> None:
-    text = render.render_lobby(_lobby(2, settings=Settings(wager=50, x=21, y=0, z=1)))
+    text = render.render_lobby(_lobby(2, request=FlipRequest(wager=50, x=21, y=0, z=1)))
     assert "Up to 2 players." in text
     assert "<b>Players 2/2</b>" in text
 
@@ -223,6 +231,42 @@ def test_a_final_lobby_has_no_buttons_and_says_nothing_was_recorded(
 
 def test_an_open_lobby_carries_buttons() -> None:
     assert keyboards.markup_for(_lobby(3)) is not None
+
+
+def test_an_explicit_request_renders_the_four_figures_exactly() -> None:
+    text = render.render_lobby(_lobby(3, request=FlipRequest(wager=50, x=5, y=2, z=3)))
+    assert "$50 a head · X 5 · Y 2 · Z 3" in text
+    assert "as many as fit" not in text
+    assert "number of players" not in text
+
+
+def test_a_lobby_for_a_flip_with_y_and_z_left_out_says_so_without_figures() -> None:
+    text = render.render_lobby(_lobby(3, request=FlipRequest(wager=50, x=5)))
+    assert "$50 a head · X 5 · Y as many as fit · Z number of players" in text
+    assert "Y 21" not in text
+    assert "Z 3" not in text
+    assert "Up to 8 players." in text
+
+
+def test_a_lobby_for_a_flip_with_only_z_left_out_keeps_the_y_figure() -> None:
+    text = render.render_lobby(_lobby(3, request=FlipRequest(wager=50, x=5, y=2)))
+    assert "$50 a head · X 5 · Y 2 · Z number of players" in text
+    assert "as many as fit" not in text
+
+
+def test_the_player_cap_of_a_defaulted_lobby_still_comes_from_x() -> None:
+    text = render.render_lobby(_lobby(2, request=FlipRequest(wager=50, x=21)))
+    assert "Up to 2 players." in text
+    assert "<b>Players 2/2</b>" in text
+
+
+@pytest.mark.parametrize(
+    "status", [LobbyStatus.CANCELLED, LobbyStatus.TIMED_OUT, LobbyStatus.VOIDED]
+)
+def test_a_closed_defaulted_lobby_still_says_what_was_asked_for(status: LobbyStatus) -> None:
+    text = render.render_lobby(_lobby(3, status=status, request=FlipRequest(wager=50, x=5)))
+    assert "$50 a head · X 5 · Y as many as fit · Z number of players" in text
+    assert "Y 21" not in text
 
 
 # ------------------------------------------------------------------------ table
@@ -307,6 +351,29 @@ def test_a_flip_that_asked_for_no_extra_cards_does_not_blame_the_deck() -> None:
     assert "Extra cards dealt" not in text
     shortage = render.render_table(_table(extra_count=0))
     assert text != shortage
+
+
+def test_a_table_that_defaulted_y_says_so_in_words_and_shows_the_resolved_z() -> None:
+    resolved = Settings(wager=50, x=5, y=21, z=3)
+    view = replace(_table(), settings=resolved, y_defaulted=True)
+    text = render.render_table(view)
+    assert "$50 a head · X 5 · Y as many as fit · Z 3" in text
+    assert "Y 21" not in text
+
+
+def test_a_table_that_did_not_default_y_shows_the_number() -> None:
+    view = replace(_table(), settings=Settings(wager=50, x=5, y=21, z=3))
+    assert not view.y_defaulted
+    text = render.render_table(view)
+    assert "Y 21" in text
+    assert "as many as fit" not in text
+
+
+def test_a_defaulted_y_with_a_short_deck_blames_the_deck_not_the_request() -> None:
+    view = replace(_table(extra_count=0), settings=Settings(wager=50, x=5, y=21, z=3))
+    text = render.render_table(replace(view, y_defaulted=True))
+    assert "No extra cards: the deck was too short to give everyone one." in text
+    assert "this flip asked for none" not in text
 
 
 def test_a_voided_table_keeps_its_cards_but_loses_the_rule_and_the_button() -> None:
@@ -475,6 +542,32 @@ def test_a_result_that_was_not_recorded_omits_the_number_and_the_verify_hint(
     assert "does not count in stats" in text
 
 
+def test_a_showdown_says_y_in_words_when_it_was_defaulted_and_z_as_a_figure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showdowns, _ = _played(monkeypatch, _scoop)
+    shown = showdowns[-1]
+    assert not shown.y_defaulted
+    plain = render.render_showdown(shown)
+    assert "Y 2 · Z 3" in plain
+    assert "as many as fit" not in plain
+    resolved = replace(shown, settings=Settings(wager=50, x=5, y=21, z=3), y_defaulted=True)
+    text = render.render_showdown(resolved)
+    assert "$50 a head · X 5 · Y as many as fit · Z 3" in text
+    assert "Y 21" not in text
+    undefaulted = render.render_showdown(replace(resolved, y_defaulted=False))
+    assert "Y 21 · Z 3" in undefaulted
+
+
+def test_a_result_for_a_defaulted_flip_renders_without_a_settings_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, result = _played(monkeypatch, _scoop)
+    text = render.render_result(replace(result, y_defaulted=True))
+    assert text == render.render_result(result)
+    assert "a head" not in text
+
+
 def test_cards_are_written_with_suit_symbols() -> None:
     cards = _cards("As 10h")
     assert format_cards(cards) == "A♠ 10♥"
@@ -518,6 +611,53 @@ def test_a_notice_built_by_the_sweep_leaves_out_what_it_cannot_know(reason: Void
     assert "a head" not in text
     assert "Players:" not in text
     assert f"Deck seed: <code>{SEED.hex()}</code>" in text
+
+
+def test_a_started_flips_notice_says_y_in_words_when_it_was_defaulted() -> None:
+    view = VoidView(
+        token="tok",
+        reason=VoidReason.ERROR,
+        settings=Settings(wager=50, x=5, y=21, z=3),
+        request=FlipRequest(wager=50, x=5),
+        players=players(3),
+        seed=SEED,
+    )
+    text = render.render_void(view)
+    assert "$50 a head · X 5 · Y as many as fit · Z 3" in text
+    assert "Y 21" not in text
+    assert "number of players" not in text
+
+
+def test_a_started_flips_notice_with_an_explicit_request_shows_the_figures() -> None:
+    view = VoidView(
+        token="tok",
+        reason=VoidReason.ERROR,
+        settings=SETTINGS,
+        request=REQUEST,
+        players=players(3),
+    )
+    text = render.render_void(view)
+    assert "$50 a head · X 5 · Y 2 · Z 3" in text
+    assert "as many as fit" not in text
+
+
+def test_a_lobby_voids_notice_shows_what_was_asked_for() -> None:
+    view = VoidView(
+        token="tok",
+        reason=VoidReason.ERROR,
+        settings=None,
+        request=FlipRequest(wager=50, x=5),
+        players=players(2),
+    )
+    text = render.render_void(view)
+    assert "$50 a head · X 5 · Y as many as fit · Z number of players" in text
+    assert "Y 21" not in text
+
+
+def test_a_notice_with_neither_settings_nor_request_has_no_settings_line() -> None:
+    text = render.render_void(VoidView(token="tok", reason=VoidReason.RESTART, seed=SEED))
+    assert "a head" not in text
+    assert "X " not in text
 
 
 def test_the_watchdog_reason_quotes_the_engines_minutes() -> None:
@@ -602,6 +742,14 @@ def test_render_keeps_every_message_inside_telegrams_limit(hostile: str) -> None
         _lobby(len(roster), names=roster),
         _table(seated=roster),
         VoidView(token="tok", reason=VoidReason.ERROR, settings=SETTINGS, players=roster),
+        _lobby(len(roster), names=roster, request=FlipRequest(wager=50, x=5)),
+        replace(_table(seated=roster), y_defaulted=True),
+        VoidView(
+            token="tok",
+            reason=VoidReason.ERROR,
+            request=FlipRequest(wager=50, x=5),
+            players=roster,
+        ),
     ]
     for view in views:
         assert len(render.render(view)) <= render.MESSAGE_LIMIT
@@ -686,7 +834,7 @@ def test_the_notice_wording_covers_exactly_the_notices() -> None:
 
 def test_a_settings_error_is_escaped_and_comes_with_the_usage_example() -> None:
     with pytest.raises(SettingsError) as caught:
-        parse_settings_tokens(["<b>50</b>", "5", "2", "3"])
+        parse_flip_request(["<b>50</b>", "5", "2", "3"])
     text = render.render_settings_error(caught.value)
     complaint = text.split("\n\n")[0]
     assert "<b>" not in complaint
@@ -697,10 +845,45 @@ def test_a_settings_error_is_escaped_and_comes_with_the_usage_example() -> None:
 
 def test_a_settings_error_about_the_count_still_carries_the_usage() -> None:
     with pytest.raises(SettingsError) as caught:
-        parse_settings_tokens(["50"])
+        parse_flip_request(["50"])
     text = render.render_settings_error(caught.value)
     assert "Got 1." in text
     assert "/flip" in text
+
+
+def test_a_field_error_and_a_count_error_both_end_with_the_usage() -> None:
+    for tokens in (["50"], ["50", "x", "2", "3"], ["50", "5", "2", "3", "4"]):
+        with pytest.raises(SettingsError) as caught:
+            parse_flip_request(tokens)
+        assert render.render_settings_error(caught.value).endswith(render.USAGE)
+
+
+def test_the_usage_shows_both_examples_the_limits_and_the_defaults() -> None:
+    usage = render.USAGE
+    assert "[&lt;Y&gt; [&lt;Z&gt;]]" in usage
+    assert "<code>/flip 50 5 2 3</code>" in usage
+    assert "<code>/flip 50 5</code>" in usage
+    for limit in (WAGER_MIN, WAGER_MAX, X_MIN, X_MAX, Y_MIN, Y_MAX, Z_MIN, Z_MAX):
+        assert f"{limit:,}" in usage
+    assert "Leave Y out for as many extra cards as fit" in usage
+    assert "Z out for the number of players" in usage
+    assert "Z needs a Y in front of it" in usage
+
+
+def test_the_new_command_replies_name_their_commands_and_fit_a_message() -> None:
+    assert "<code>/again</code>" in render.AGAIN_USAGE
+    assert "<code>/flip</code>" in render.AGAIN_USAGE
+    assert "nothing to repeat" in render.NO_FLIP_TO_REPEAT
+    assert "/flip" in render.NO_FLIP_TO_REPEAT
+    for text in (render.USAGE, render.AGAIN_USAGE, render.NO_FLIP_TO_REPEAT):
+        assert len(text) <= render.MESSAGE_LIMIT
+
+
+def test_the_new_constants_carry_no_markup_but_the_deliberate_kind() -> None:
+    for text in (render.USAGE, render.AGAIN_USAGE, render.NO_FLIP_TO_REPEAT):
+        bare = text.replace("<code>", "").replace("</code>", "")
+        assert "<" not in bare
+        assert ">" not in bare
 
 
 def test_the_settings_error_text_alone_is_escaped() -> None:
@@ -709,13 +892,19 @@ def test_the_settings_error_text_alone_is_escaped() -> None:
 
 
 def test_already_open_names_the_open_flips_settings() -> None:
-    text = render.render_already_open(Settings(wager=75, x=6, y=1, z=4))
+    text = render.render_already_open(FlipRequest(wager=75, x=6, y=1, z=4))
     assert "already open" in text
     assert "$75 a head · X 6 · Y 1 · Z 4" in text
 
 
+def test_already_open_for_a_defaulted_flip_invents_no_figures() -> None:
+    text = render.render_already_open(FlipRequest(wager=75, x=6))
+    assert "$75 a head · X 6 · Y as many as fit · Z number of players" in text
+    assert "Y 21" not in text
+
+
 def test_a_big_wager_gets_thousands_separators() -> None:
-    text = render.render_already_open(Settings(wager=1_000_000, x=6, y=1, z=4))
+    text = render.render_already_open(FlipRequest(wager=1_000_000, x=6, y=1, z=4))
     assert "$1,000,000 a head" in text
 
 

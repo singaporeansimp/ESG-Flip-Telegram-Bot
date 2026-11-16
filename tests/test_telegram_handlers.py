@@ -28,6 +28,9 @@ from esgbot.telegram import keyboards, render
 from esgbot.telegram.keyboards import Press, pack
 from tests.engine_helpers import GROUP, SETTINGS, use_seed
 from tests.telegram_helpers import (
+    DEFAULT_REQUEST as REQUEST,
+)
+from tests.telegram_helpers import (
     STARTER,
     TOPIC,
     BotHarness,
@@ -38,6 +41,7 @@ from tests.telegram_helpers import (
     group_message,
     migration_message,
     topic_message,
+    user,
 )
 
 _JOINER = 12
@@ -108,7 +112,7 @@ def test_flip_opens_one_lobby_with_four_buttons_and_the_starter_in_it() -> None:
         assert lobby.chat_id == GROUP
         assert lobby.thread_id is None
         assert len(lobby.buttons) == 4
-        assert flip.settings == SETTINGS
+        assert flip.request == REQUEST
         assert flip.starter.user_id == STARTER
         assert [seated.user_id for seated in flip.players] == [STARTER]
         assert flip.message_id == lobby.message_id
@@ -137,9 +141,9 @@ def test_flip_carries_the_senders_name_and_username_onto_the_player() -> None:
 @pytest.mark.parametrize(
     ("command", "complaint"),
     [
-        pytest.param("/flip", "Give four whole numbers", id="no-arguments"),
-        pytest.param("/flip 50 5 2", "Give four whole numbers", id="too-few"),
-        pytest.param("/flip 50 5 2 3 1", "Give four whole numbers", id="too-many"),
+        pytest.param("/flip", "Give the wager and X", id="no-arguments"),
+        pytest.param("/flip 50", "Give the wager and X", id="wager-alone"),
+        pytest.param("/flip 50 5 2 3 1", "Give the wager and X", id="too-many"),
         pytest.param("/flip abc 5 2 3", "wager must be", id="wager-not-digits"),
         pytest.param("/flip 50 five 2 3", "X must be", id="x-not-digits"),
         pytest.param("/flip $50 5 2 3", "wager must be", id="dollar-sign"),
@@ -199,7 +203,7 @@ def test_a_second_flip_in_the_same_group_is_refused_and_the_first_is_untouched()
 
         assert world.registry.flips == (first,)
         assert world.registry.flip_for_group(GROUP) is first
-        assert first.settings == SETTINGS
+        assert first.request == REQUEST
         assert len(world.client.sends) == sends_before + 1
         refusal = world.client.sends[-1]
         assert "already open" in refusal.text
@@ -861,7 +865,7 @@ def test_a_flip_open_when_its_group_migrates_plays_out_in_the_new_chat() -> None
 
         await world.feed(message=group_message("/flip 50 5 2 3", chat_id=_NEW_GROUP))
         assert world.client.sends[-1].chat_id == _NEW_GROUP
-        assert world.client.sends[-1].text == render.render_already_open(SETTINGS)
+        assert world.client.sends[-1].text == render.render_already_open(REQUEST)
         assert world.registry.flips == (flip,)
 
         await _play_out(world, flip)
@@ -969,6 +973,436 @@ def test_a_storage_failure_during_migration_is_logged_and_not_raised(
         assert str(GROUP) in caplog.text
         assert str(_NEW_GROUP) in caplog.text
         assert world.client.calls == []
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------------------------- /flip, short forms
+
+
+def test_flip_with_only_the_wager_and_x_leaves_y_and_z_to_the_bot() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        flip = await _open_typed(world, "/flip 50 5")
+
+        assert flip.request == rules.FlipRequest(wager=50, x=5)
+        assert flip.request.y is None
+        assert flip.request.z is None
+        assert flip.settings is None
+        lobby = world.client.sends[0]
+        assert len(lobby.buttons) == 4
+        assert [seated.user_id for seated in flip.players] == [STARTER]
+        assert "$50 a head" in lobby.text
+        assert "Y 21" not in lobby.text
+        assert "Z 1" not in lobby.text
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_flip_with_a_y_and_no_z_leaves_only_z_to_the_bot() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        flip = await _open_typed(world, "/flip 50 5 2")
+
+        assert flip.request.y == 2
+        assert flip.request.z is None
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_flip_with_every_setting_defaults_nothing() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        flip = await _open_typed(world, "/flip 50 5 2 3")
+
+        assert flip.request == rules.FlipRequest(wager=50, x=5, y=2, z=3)
+        assert not flip.request.y_defaulted
+        assert not flip.request.z_defaulted
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("command", "complaint"),
+    [
+        pytest.param("/flip 50 abc", "X must be", id="bad-x-without-y"),
+        pytest.param(f"/flip 50 5 {rules.Y_MAX + 1}", "Y must be", id="bad-y-without-z"),
+        pytest.param("/flip 50 5 2 0", "Z must be", id="bad-z"),
+    ],
+)
+def test_flip_with_a_bad_short_form_names_the_problem_and_opens_nothing(
+    command: str, complaint: str
+) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        await world.flip_command(command)
+
+        assert len(world.client.sends) == 1
+        assert complaint in world.client.sends[0].text
+        assert world.client.sends[0].markup is None
+        assert world.registry.flips == ()
+        assert world.store.active == {}
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_player_cap_of_a_defaulted_flip_comes_from_x_alone() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        flip = await _open_typed(world, "/flip 50 21")
+
+        assert flip.request.max_players == 2
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+# -------------------------------------------------------------------- /again
+
+
+async def _open_typed(world: BotHarness, command: str, *, topic_id: int | None = None) -> Flip:
+    """Send this ``/flip`` command and return the flip it opened."""
+    await world.flip_command(command, topic_id=topic_id)
+    flip = world.registry.flip_for_group(world.group_id)
+    assert flip is not None
+    return flip
+
+
+async def _record(
+    world: BotHarness,
+    command: str,
+    *,
+    players: int = 2,
+    group_id: int = GROUP,
+    topic_id: int | None = None,
+) -> Flip:
+    """Play ``command`` out with this many players, so the group has a recorded flip."""
+    if group_id == GROUP:
+        flip = await _open_typed(world, command, topic_id=topic_id)
+    else:
+        await world.feed(message=group_message(command, chat_id=group_id))
+        found = world.registry.flip_for_group(group_id)
+        assert found is not None
+        flip = found
+    for extra in range(1, players):
+        press_id = world.press_id()
+        await world.feed(
+            callback_query=button_press(
+                pack(Press.JOIN, flip.token),
+                user_id=_JOINER + extra,
+                press_id=press_id,
+                name=f"P{extra}",
+                chat_id=group_id,
+            )
+        )
+    press_id = world.press_id()
+    await world.feed(
+        callback_query=button_press(
+            pack(Press.START, flip.token), press_id=press_id, chat_id=group_id
+        )
+    )
+    await _play_out(world, flip)
+    assert flip.closed
+    assert world.registry.flip_for_group(group_id) is None
+    return flip
+
+
+async def _again(
+    world: BotHarness, *, sender_id: int = STARTER, topic_id: int | None = None
+) -> None:
+    """Send ``/again`` as this user."""
+    sender = user(sender_id, name="Sam" if sender_id == STARTER else "Pat", username=None)
+    if topic_id is None:
+        await world.feed(message=group_message("/again", sender=sender))
+    else:
+        await world.feed(message=topic_message("/again", topic_id=topic_id, sender=sender))
+
+
+def test_again_opens_a_new_lobby_with_the_same_settings_and_the_typer_alone_in_it() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        first = await _record(world, "/flip 50 5 2 3")
+        sends_before = len(world.client.sends)
+
+        await _again(world)
+
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip is not first
+        assert flip.request == REQUEST
+        assert flip.starter.user_id == STARTER
+        assert [seated.user_id for seated in flip.players] == [STARTER]
+        assert len(world.client.sends) == sends_before + 1
+        lobby = world.client.sends[-1]
+        assert len(lobby.buttons) == 4
+        assert lobby.chat_id == GROUP
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("players", [2, 3])
+def test_again_repeats_a_defaulted_z_as_defaulted_for_the_new_player_count(
+    players: int,
+) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5", players=players)
+        new_count = 5 - players
+
+        await _again(world)
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.request == rules.FlipRequest(wager=50, x=5)
+        for extra in range(1, new_count):
+            await _press(world, flip, Press.JOIN, user_id=_JOINER + extra, name=f"P{extra}")
+        await _press(world, flip, Press.START)
+
+        assert flip.settings is not None
+        assert flip.settings.z == new_count
+        assert flip.settings.z != players
+        assert flip.settings.y == rules.Y_MAX
+        await _play_out(world, flip)
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_repeats_an_explicit_flip_exactly_whatever_the_player_count() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3", players=2)
+
+        await _again(world)
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.request == rules.FlipRequest(wager=50, x=5, y=2, z=3)
+        for extra in range(1, 4):
+            await _press(world, flip, Press.JOIN, user_id=_JOINER + extra, name=f"P{extra}")
+        await _press(world, flip, Press.START)
+
+        assert flip.settings is not None
+        assert (flip.settings.y, flip.settings.z) == (2, 3)
+        await _play_out(world, flip)
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_makes_whoever_typed_it_the_starter_and_does_not_reinvite_the_others() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+
+        await _again(world, sender_id=_STRANGER)
+
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.starter.user_id == _STRANGER
+        assert [seated.user_id for seated in flip.players] == [_STRANGER]
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_with_no_finished_flip_says_there_is_nothing_to_repeat() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+
+        await _again(world)
+
+        assert [call.text for call in world.client.sends] == [render.NO_FLIP_TO_REPEAT]
+        assert world.registry.flips == ()
+        assert world.store.active == {}
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_cancelled_flip_is_not_the_last_flip() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        flip = await _open_typed(world, "/flip 50 5 2 3")
+        await _press(world, flip, Press.CANCEL)
+        assert world.registry.flip_for_group(GROUP) is None
+
+        await _again(world)
+
+        assert world.client.sends[-1].text == render.NO_FLIP_TO_REPEAT
+        assert world.registry.flips == ()
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_cancelled_flip_does_not_replace_the_last_recorded_one() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        await world.flip_command("/flip 10 6")
+        cancelled = world.registry.flip_for_group(GROUP)
+        assert cancelled is not None
+        await _press(world, cancelled, Press.CANCEL)
+
+        await _again(world)
+
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.request == REQUEST
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_while_a_flip_is_open_says_so_and_leaves_that_flip_alone() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        open_flip = await _open_typed(world, "/flip 10 6")
+        sends_before = len(world.client.sends)
+
+        await _again(world)
+
+        assert world.registry.flips == (open_flip,)
+        assert open_flip.request == rules.FlipRequest(wager=10, x=6)
+        assert len(world.client.sends) == sends_before + 1
+        refusal = world.client.sends[-1]
+        assert refusal.text == render.render_already_open(open_flip.request)
+        assert refusal.markup is None
+        assert open_flip.phase is FlipPhase.LOBBY
+        assert [seated.user_id for seated in open_flip.players] == [STARTER]
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_in_a_private_chat_says_flips_need_a_group_and_opens_nothing() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        sends_before = len(world.client.sends)
+
+        await world.feed(message=group_message("/again", chat_type="private"))
+
+        assert [call.text for call in world.client.sends[sends_before:]] == [
+            render.NO_FLIP_IN_PRIVATE
+        ]
+        assert world.registry.flips == ()
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_in_another_topic_opens_the_flip_in_the_topic_it_was_sent_in() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3", topic_id=TOPIC)
+
+        await _again(world, topic_id=TOPIC + 1)
+
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.topic_id == TOPIC + 1
+        assert world.client.sends[-1].thread_id == TOPIC + 1
+        assert world.store.active[flip.token].topic_id == TOPIC + 1
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "error", [StorageError("the database is locked"), sqlite3.OperationalError("disk I/O error")]
+)
+def test_again_with_a_failing_database_says_so_logs_it_and_opens_nothing(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        world.store.last_flip_error = error
+
+        with caplog.at_level(logging.ERROR):
+            await _again(world)
+
+        assert world.client.sends[-1].text == render.STORAGE_TROUBLE
+        assert world.registry.flips == ()
+        assert str(error) in caplog.text
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+        world.store.last_flip_error = None
+        await _again(world)
+        assert world.registry.flip_for_group(GROUP) is not None
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_with_arguments_explains_itself_and_opens_nothing() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        sends_before = len(world.client.sends)
+
+        await world.feed(message=group_message("/again 50 5"))
+
+        assert [call.text for call in world.client.sends[sends_before:]] == [render.AGAIN_USAGE]
+        assert world.registry.flips == ()
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_repeats_each_groups_own_last_flip() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        other = -2002
+        await _record(world, "/flip 50 5 2 3")
+        await _record(world, "/flip 10 6", group_id=other)
+
+        await _again(world)
+        await world.feed(message=group_message("/again", chat_id=other))
+
+        mine = world.registry.flip_for_group(GROUP)
+        theirs = world.registry.flip_for_group(other)
+        assert mine is not None
+        assert theirs is not None
+        assert mine.request == REQUEST
+        assert theirs.request == rules.FlipRequest(wager=10, x=6)
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_flip_opened_by_again_is_recorded_as_typed_so_again_can_repeat_it() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5", players=2)
+
+        await _again(world)
+        again = world.registry.flip_for_group(GROUP)
+        assert again is not None
+        await _press(world, again, Press.JOIN, user_id=_JOINER, name="Pat")
+        await _press(world, again, Press.JOIN, user_id=_JOINER + 1, name="Kim")
+        await _press(world, again, Press.START)
+        await _play_out(world, again)
+        assert len(world.store.recorded) == 2
+
+        stored = await world.store.last_flip_request(GROUP)
+        assert stored == rules.FlipRequest(wager=50, x=5)
+        await _again(world)
+        third = world.registry.flip_for_group(GROUP)
+        assert third is not None
+        assert third.request == rules.FlipRequest(wager=50, x=5)
         await world.close()
 
     asyncio.run(scenario())

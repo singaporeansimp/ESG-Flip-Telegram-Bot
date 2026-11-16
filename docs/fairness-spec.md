@@ -98,6 +98,13 @@ not measurable and not worth correcting for.)
 Inputs: the seed, the player list in join order, `X` (hole cards per player) and `Y` (maximum
 extra cards per player). Seat `i` is the `i`-th player to have joined, counting from 0.
 
+Nothing here depends on how the flip was configured. A command may leave `Y` out, in which case
+the bot fills in the maximum (`Y = 21`) before the deal, and `Z` out, in which case it fills in
+the number of players — but both are resolved when **Start** locks the player list, which is
+before the seed exists, and what is stored and revealed is the values the deal actually ran on.
+So an independent implementation reads `X` and `Y` from the stored flip and needs to know nothing
+about the command that opened it.
+
 **Dealing order.** Every round of dealing starts with the seat after the button and moves up
 through the seats, wrapping around:
 
@@ -130,8 +137,11 @@ rounds, so each player ends with 21 cards.
 
 ## Stored form and reveal
 
-A finished flip stores the seed (hex), the commitment, the button seat and the full deal. The
-deal is stored as JSON with every card written as its index:
+A finished flip stores the seed (hex), the commitment, the button seat, all four settings and the
+full deal. It also stores one flag per setting the command left out, which `/again` reads to
+repeat the command; the deal and the money follow from the settings themselves, so those flags
+are no part of this procedure and no part of what `/verify` checks. The deal is stored as JSON
+with every card written as its index:
 
 ```json
 {
