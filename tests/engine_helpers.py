@@ -8,7 +8,8 @@ Keep it that way. Everything here yields to the event loop with
 :func:`asyncio.sleep` of zero and never sleeps for real or hands work to a thread,
 which is what makes :meth:`FakeClock.advance` enough to drive a flip to its next
 decision. That is also why the tests settle the showdown with
-:func:`settle_inline` instead of the engine's default worker thread.
+:func:`settle_inline`, and read a peek's made hands with :func:`read_inline`,
+instead of the engine's default worker threads.
 """
 
 from __future__ import annotations
@@ -25,14 +26,18 @@ from esgbot.engine import (
     Flip,
     FlipRegistry,
     FlipView,
+    HandReader,
+    MadeHand,
     MessageTarget,
     PermanentFailureError,
     Player,
     PressAnswer,
     Settler,
+    read_hand,
     timing,
 )
 from esgbot.game import fairness
+from esgbot.game.cards import Card
 from esgbot.game.deal import Deal, deal_cards
 from esgbot.game.rules import FlipRequest, Settings
 from esgbot.game.settlement import FlipOutcome, settle_deal
@@ -57,6 +62,7 @@ __all__ = [
     "outcome_for",
     "player",
     "players",
+    "read_inline",
     "seed_where",
     "settle_inline",
     "use_seed",
@@ -88,6 +94,17 @@ async def settle_inline(deal: Deal, settings: Settings) -> FlipOutcome:
     bot runs; one test checks it really does hand the work to another thread.
     """
     return settle_deal(deal, settings)
+
+
+async def read_inline(
+    cards: Sequence[Card], boards: Sequence[Sequence[Card]]
+) -> tuple[MadeHand, ...]:
+    """Read a peek's made hands on the event loop, for the same reason.
+
+    :func:`esgbot.engine.read_hand_in_thread` is what the bot runs, and one test
+    checks that it really does hand the work to another thread.
+    """
+    return read_hand(cards, boards)
 
 
 def outcome_for(seed: bytes, player_ids: Sequence[int], settings: Settings) -> FlipOutcome:
@@ -640,19 +657,23 @@ def harness_over(
     clock: FakeClock,
     store: FakeStore | None = None,
     settle: Settler = settle_inline,
+    read_hand: HandReader = read_inline,
     settings: Settings = SETTINGS,
     group_id: int = GROUP,
 ) -> Harness:
-    """The same, over a gateway, store or settler the test built itself.
+    """The same, over a gateway, store, settler or hand reader the test built itself.
 
     :func:`harness` is this with the plain fakes. A test that needs output or
     storage to hold or fail at one particular moment builds that part -- usually
     :class:`HoldsAView` or :class:`HoldsAnAnswer` -- and comes here for the rest,
     rather than wiring a registry of its own. ``settle`` is the showdown's own
-    work, which a test can count to see how far a round really got.
+    work, which a test can count to see how far a round really got, and
+    ``read_hand`` is the same seam for the reading behind a Peek pop-up.
     """
     flip_store = FakeStore() if store is None else store
-    registry = FlipRegistry(gateway=gateway, store=flip_store, clock=clock, settle=settle)
+    registry = FlipRegistry(
+        gateway=gateway, store=flip_store, clock=clock, settle=settle, read_hand=read_hand
+    )
     return Harness(
         clock=clock,
         gateway=gateway,

@@ -22,7 +22,7 @@ from aiogram.exceptions import TelegramMigrateToChat
 from aiogram.methods import EditMessageText
 from aiogram.types import Message
 
-from esgbot.engine import Flip, FlipPhase, Notice, timing
+from esgbot.engine import Flip, FlipPhase, Notice, read_hand, timing
 from esgbot.game import rules
 from esgbot.game.deal import deal_cards
 from esgbot.storage import FlipState, StorageError
@@ -636,6 +636,44 @@ def test_peek_is_a_private_alert_holding_only_that_players_cards(
             assert not {str(card) for card in theirs.cards} & _tokens(answer.text)
         assert {str(card) for card in mine.extra} <= _tokens(late.text)
         assert not {str(card) for card in mine.extra} & _tokens(early.text)
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_peek_pop_up_says_what_the_hand_has_made_on_the_boards_that_are_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pop-up a player really reads, and the board it may not breathe a word about.
+
+    Board 1 is on the table two seconds before Board 2 is, and both are fixed at
+    Start, so the pop-up in between may say what the hand has on Board 1 and
+    must not name Board 2, show one of its cards, or say what the hand would
+    have on it.
+    """
+
+    async def scenario() -> None:
+        world = bot_harness()
+        use_seed(monkeypatch, _SEED)
+        flip = await _two_players(world)
+        await _press(world, flip, Press.START)
+        deal = deal_cards(seed=_SEED, player_ids=[STARTER, _JOINER], x=SETTINGS.x, y=SETTINGS.y)
+
+        early = await _press(world, flip, Press.PEEK)
+        await world.clock.advance(timing.BOARD_GAP_SECONDS)
+        late = await _press(world, flip, Press.PEEK)
+
+        mine = deal.hands[0]
+        assert "Board 1: " in early.text
+        assert "Hand strength: " in early.text
+        assert "Board 2" not in early.text
+        assert not {str(card) for card in deal.board2} & _tokens(early.text)
+        for made in read_hand(mine.hole, (deal.board1,)):
+            assert made.hand.description in early.text
+        for made in read_hand(mine.cards, deal.boards):
+            assert made.hand.description in late.text
+        assert "Board 1: " in late.text
+        assert "Board 2: " in late.text
         await world.close()
 
     asyncio.run(scenario())

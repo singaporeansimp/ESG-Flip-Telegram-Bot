@@ -43,12 +43,20 @@ from esgbot.engine import (
     VoidView,
 )
 from esgbot.game import fairness
-from esgbot.game.cards import FULL_DECK
-from esgbot.game.rules import FlipRequest, Settings, SettingsError, parse_flip_request
+from esgbot.game.rules import Y_MAX, FlipRequest, Settings, SettingsError, parse_flip_request
 from esgbot.storage import PlayerStats
 from esgbot.telegram import render
 from esgbot.verify import Verification, VerifyPart
-from tests.engine_helpers import harness, player, players, seed_where, use_seed
+from tests.engine_helpers import (
+    FakeClock,
+    HoldsAView,
+    harness,
+    harness_over,
+    player,
+    players,
+    seed_where,
+    use_seed,
+)
 
 __all__ = ["ALERT", "MESSAGE", "Sample", "build_gallery", "main", "write_gallery"]
 
@@ -63,6 +71,15 @@ _EXPLICIT: Final = Settings(wager=50, x=5, y=2, z=3)
 
 _DEFAULTED: Final = FlipRequest(wager=50, x=5)
 """``/flip 50 5``: the extra cards and the scoop multiplier left to the bot."""
+
+_NO_EXTRAS: Final = Settings(wager=50, x=5, y=0, z=3)
+"""``/flip 50 5 0 3``: a flip whose hands are final as soon as they are dealt."""
+
+_BIGGEST: Final = Settings(wager=50, x=5, y=Y_MAX, z=2)
+"""Two players at the deck's limit: five private cards each and sixteen extra."""
+
+_PEEK_SEED: Final = bytes(range(fairness.SEED_SIZE))
+"""The deal behind the peek pop-ups, pinned so the gallery reads the same every time."""
 
 _IDS: Final = [11, 12, 13]
 _EVIL: Final = "<b>Ev&il</b> Bob"
@@ -255,6 +272,53 @@ def _flip_samples(section: str, views: dict[str, FlipView]) -> list[Sample]:
     return [Sample(section, title, render.render(view)) for title, view in views.items()]
 
 
+def _peek(
+    stage: TableStage,
+    *,
+    settings: Settings | FlipRequest = _EXPLICIT,
+    count: int = len(_IDS),
+    seat: int = 0,
+) -> PeekAnswer:
+    """One real peek, pressed while the table edit for ``stage`` is still in flight.
+
+    Which is what decides how much the pop-up may say: a hand is only ever read
+    against the boards the group has already been shown, so a peek caught before
+    Board 1 lands says what the hand is worth on its own and no more.
+    """
+    answers: list[PeekAnswer] = []
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        gateway = HoldsAView(
+            clock, chosen=lambda view: isinstance(view, TableView) and view.stage is stage
+        )
+        world = harness_over(gateway, clock=clock)
+        async with world.registry:
+            flip = await world.open_lobby(joiners=count - 1, settings=settings)
+            await world.deal(flip)
+            answer = await flip.peek(_IDS[0] + seat, press_id=world.press())
+            assert isinstance(answer, PeekAnswer)
+            answers.append(answer)
+            gateway.go.set()
+            await world.finish(flip)
+
+    with pytest.MonkeyPatch.context() as patch:
+        use_seed(patch, _PEEK_SEED)
+        asyncio.run(scenario())
+    return answers[0]
+
+
+def _peeks() -> dict[str, PeekAnswer]:
+    """One real peek from each moment of a deal a player can press Peek at."""
+    return {
+        "before any board is out": _peek(TableStage.BOARD1),
+        "with board 1 out": _peek(TableStage.BOARD2),
+        "with both boards out and the extra cards dealt": _peek(TableStage.PEEKING, seat=1),
+        "a flip with no extra cards": _peek(TableStage.PEEKING, settings=_NO_EXTRAS),
+        "the largest hand a flip can deal": _peek(TableStage.PEEKING, settings=_BIGGEST, count=2),
+    }
+
+
 def build_gallery() -> list[Sample]:
     """Every message the bot sends, rendered once, in the order a flip meets them."""
     ordinary = _play(wanted="any")
@@ -412,17 +476,9 @@ def build_gallery() -> list[Sample]:
         },
     )
 
-    peeks = {
-        "private cards only": PeekAnswer(seat=0, hole=FULL_DECK[:5]),
-        "private cards and the extra cards": PeekAnswer(
-            seat=1, hole=FULL_DECK[:5], extra=FULL_DECK[5:7]
-        ),
-        "the largest hand a flip can deal": PeekAnswer(
-            seat=1, hole=FULL_DECK[:5], extra=FULL_DECK[5:21]
-        ),
-    }
     samples += [
-        Sample("Peek", title, render.render_peek(answer), ALERT) for title, answer in peeks.items()
+        Sample("Peek", title, render.render_peek(answer), ALERT)
+        for title, answer in _peeks().items()
     ]
     samples += [
         Sample("Button answers", notice.value, render.render_notice(notice), ALERT)

@@ -52,8 +52,11 @@ either theme.
 
 **The pop-up a Peek raises** is the one thing that is not HTML:
 :func:`render_peek` writes plain text, because a callback answer is plain text,
-and keeps it inside Telegram's :data:`ALERT_LIMIT` of 200 characters. The largest
-hand in any flip is 21 cards, which fits with room to spare.
+and keeps it inside Telegram's :data:`ALERT_LIMIT` of 200 characters. It is also
+the one message with no room to spare: a 21-card hand and three made hands do
+not fit in 200 characters however they are worded, so the hand is always written
+out in full and the made hands are written in the roomiest of three forms that
+fits. :func:`render_peek` says what those are.
 
 The numbers in the showdown rule on the table come from
 :mod:`esgbot.engine.timing` rather than being written out here, so the pacing is
@@ -75,6 +78,7 @@ from esgbot.engine.views import (
     HandView,
     LobbyStatus,
     LobbyView,
+    MadeHand,
     Notice,
     PeekAnswer,
     Player,
@@ -87,7 +91,8 @@ from esgbot.engine.views import (
     VoidReason,
     VoidView,
 )
-from esgbot.game.cards import Card, format_cards
+from esgbot.game.cards import Card, Rank, format_cards
+from esgbot.game.evaluator import Category, HandRank
 from esgbot.game.fairness import seed_to_hex
 from esgbot.game.rules import (
     MIN_PLAYERS,
@@ -181,6 +186,42 @@ _BOARD_NAMES: Final[dict[Board, str]] = {
     Board.BOARD2: "Board 2",
     Board.HAND_STRENGTH: "Hand strength",
 }
+
+_BOARD_MARKS: Final[dict[Board, str]] = {
+    Board.BOARD1: "B1",
+    Board.BOARD2: "B2",
+    Board.HAND_STRENGTH: "HS",
+}
+"""The boards' names cut to two letters, for the shortest rung of a pop-up.
+
+Only the biggest hands ever see these: see :func:`render_peek`. They are in the
+same order as the full names, one line under the next, which is what makes them
+readable at all.
+"""
+
+_SHORT_HANDS: Final[dict[Category, str]] = {
+    Category.STRAIGHT_FLUSH: "str flush {0}",
+    Category.FOUR_OF_A_KIND: "quads {0}",
+    Category.FULL_HOUSE: "full house {0}/{1}",
+    Category.FLUSH: "flush {0}",
+    Category.STRAIGHT: "straight {0}",
+    Category.THREE_OF_A_KIND: "trips {0}",
+    Category.TWO_PAIR: "two pair {0}/{1}",
+    Category.PAIR: "pair {0}",
+    Category.HIGH_CARD: "{0} high",
+}
+"""What each hand is called where there is no room for words: ``full house Q/7``.
+
+The slots take the ranks that name the hand, in the order
+:attr:`~esgbot.game.evaluator.HandRank.tiebreak` gives them, written as they are
+on a card. This is the same hand the evaluator named, said shorter -- a pop-up
+holding a 21-card hand has around twenty characters a line for three boards --
+and it keeps the rank, which is the half of "what have I got" that changes from
+one deal to the next.
+"""
+
+_ROYAL_SHORT: Final = "royal"
+"""The shortest rung's name for the one hand the long form calls a royal flush."""
 
 _NOTICES: Final[dict[Notice, str]] = {
     Notice.JOINED: "You are in. You will get your cards when the round starts.",
@@ -360,10 +401,27 @@ def _cards(cards: Sequence[Card]) -> str:
 
 
 def _hand_cards(hole: Sequence[Card], extra: Sequence[Card]) -> str:
-    """A whole hand, with the cards dealt after the boards marked."""
+    """A whole hand as it was dealt, with the cards dealt after the boards marked."""
     shown = list(format_cards(hole).split()) if hole else []
     shown += [f"{card}{_EXTRA_MARK}" for card in extra]
     return " ".join(shown)
+
+
+def _sorted_hand(hole: Sequence[Card], extra: Sequence[Card]) -> str:
+    """The same hand sorted, highest first, for the player looking at their own cards.
+
+    Rank first, ace high, and then suit -- spades, hearts, diamonds, clubs, which
+    is the order the card index puts them in, read backwards. It is a reading
+    order and nothing more: suits never decide a hand, and a rank is a rank
+    whatever it goes on to make, so the ace of a five-high straight sorts at the
+    top of the hand all the same.
+
+    The mark follows the card rather than its place, so a card dealt after the
+    boards is still marked wherever it lands.
+    """
+    marked = [(card, "") for card in hole] + [(card, _EXTRA_MARK) for card in extra]
+    marked.sort(key=lambda held: (held[0].rank, held[0].suit), reverse=True)
+    return " ".join(f"{card}{mark}" for card, mark in marked)
 
 
 def _amount(dollars: int) -> str:
@@ -875,21 +933,69 @@ def render_void(view: VoidView) -> str:
 # --------------------------------------------------------------- press answers
 
 
-def render_peek(answer: PeekAnswer) -> str:
-    """One player's own cards, as the plain text of a pop-up.
+def _made_in_full(made: MadeHand) -> str:
+    """``Board 1: flush, jack high · A♠ K♠ Q♠ J♠ 9♠``: the hand named, and the five cards."""
+    return f"{_BOARD_NAMES[made.board]}: {made.hand.description} · {_cards(made.hand.cards)}"
 
-    Plain text, not HTML: a callback answer is never parsed. The longest hand a
-    flip can deal is 21 cards, which leaves this well inside
-    :data:`ALERT_LIMIT`.
+
+def _made_named(made: MadeHand) -> str:
+    """``Board 1: flush, jack high``: the hand named, without saying which cards."""
+    return f"{_BOARD_NAMES[made.board]}: {made.hand.description}"
+
+
+def _made_short(made: MadeHand) -> str:
+    """``B1: flush J``: as little as still names the hand. See :data:`_SHORT_HANDS`."""
+    return f"{_BOARD_MARKS[made.board]}: {_short_hand(made.hand.rank)}"
+
+
+def _short_hand(rank: HandRank) -> str:
+    """One hand in the fewest characters that still name it: ``full house Q/7``."""
+    if rank.category is Category.STRAIGHT_FLUSH and rank.tiebreak[0] is Rank.ACE:
+        return _ROYAL_SHORT
+    return _SHORT_HANDS[rank.category].format(*(held.label for held in rank.tiebreak))
+
+
+_MADE_FORMS: Final = (_made_in_full, _made_named, _made_short)
+"""How a made hand may be written, roomiest first. See :func:`render_peek`."""
+
+
+def render_peek(answer: PeekAnswer) -> str:
+    """One player's own cards and what they have made, as the plain text of a pop-up.
+
+    Plain text, not HTML: a callback answer is never parsed. The cards come
+    highest first, as a player holds them, with the ones just dealt marked; then
+    one line per board the answer carries, which is the hand-strength board
+    alone before any community board is out, and all three once both are.
+
+    **The cards always fit, so the readings are what give way.** A pop-up has
+    :data:`ALERT_LIMIT` characters, and the biggest hand in a flip -- 21 cards,
+    sixteen of them marked -- takes most of them, leaving around twenty
+    characters a line for three boards. So the readings are written in the
+    roomiest of three forms that fits the whole pop-up, all three lines in the
+    same one:
+
+    1. the hand named, with the five cards it is made of;
+    2. the hand named;
+    3. :data:`_BOARD_MARKS` and :data:`_SHORT_HANDS` -- ``B1: full house Q/7``.
+
+    The last of those fits every hand a flip can deal with room to spare, which
+    the tests prove by sweeping every legal shape of hand, so a line is never
+    dropped and the cards are never cut. :func:`_clip` is the backstop under all
+    of it and nothing reaches it.
     """
     cards = answer.cards
-    lines = [
+    head = [
         f"Your cards · seat {answer.seat + 1} · {_count(len(cards), 'card')}",
-        _hand_cards(answer.hole, answer.extra),
+        _sorted_hand(answer.hole, answer.extra),
     ]
     if answer.extra:
-        lines.append(f"{_EXTRA_MARK} just dealt")
-    return _clip("\n".join(lines), ALERT_LIMIT)
+        head.append(f"{_EXTRA_MARK} just dealt")
+    laid_out = ["\n".join([*head, *(form(made) for made in answer.made)]) for form in _MADE_FORMS]
+    for text in laid_out:
+        if len(text) <= ALERT_LIMIT:
+            return text
+    # Nothing a flip can deal gets here; the clip is the guarantee all the same.
+    return _clip(laid_out[-1], ALERT_LIMIT)
 
 
 def render_notice(notice: Notice) -> str:

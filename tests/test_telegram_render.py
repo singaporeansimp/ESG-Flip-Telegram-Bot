@@ -16,6 +16,7 @@ import re
 from collections.abc import Callable
 from dataclasses import replace
 from fractions import Fraction
+from typing import Final
 
 import pytest
 
@@ -26,6 +27,7 @@ from esgbot.engine import (
     HandView,
     LobbyStatus,
     LobbyView,
+    MadeHand,
     Notice,
     PeekAnswer,
     Player,
@@ -37,11 +39,15 @@ from esgbot.engine import (
     TableView,
     VoidReason,
     VoidView,
+    read_hand,
     timing,
 )
 from esgbot.game import fairness
-from esgbot.game.cards import Card, Rank, Suit, format_cards
+from esgbot.game.cards import FULL_DECK, Card, Rank, Suit, format_cards
+from esgbot.game.deal import deal_cards, extra_rounds_for
+from esgbot.game.evaluator import BestHand, Category, HandRank, rank_five
 from esgbot.game.rules import (
+    BOARD_COUNT,
     MIN_PLAYERS,
     WAGER_MAX,
     WAGER_MIN,
@@ -55,6 +61,7 @@ from esgbot.game.rules import (
     FlipRequest,
     Settings,
     SettingsError,
+    max_players,
     parse_flip_request,
 )
 from esgbot.game.scoring import Board
@@ -985,27 +992,88 @@ def test_render_dispatches_every_view_type(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def _widest_hand(hole_count: int, extra_count: int) -> tuple[tuple[Card, ...], tuple[Card, ...]]:
+    """The longest-reading hand of this shape: as many tens as there are, then the rest.
+
+    ``10♥`` is three characters where every other card is two, and a deck holds
+    four tens, so this is the widest a real hand of a given size can read.
+    """
     tens = [Card(Rank.TEN, suit) for suit in Suit]
-    pool = [tens[index % 4] for index in range(hole_count + extra_count)]
-    return tuple(pool[:hole_count]), tuple(pool[hole_count:])
+    pool = tens + [card for card in FULL_DECK if card.rank is not Rank.TEN]
+    held = pool[: hole_count + extra_count]
+    return tuple(held[:hole_count]), tuple(held[hole_count:])
+
+
+def _made(board: Board, description: str, cards: str) -> MadeHand:
+    """A made hand built from real cards, so its wording is the evaluator's own."""
+    five = _cards(cards)
+    hand = BestHand(rank=rank_five(five), cards=five)
+    assert hand.description == description
+    return MadeHand(board=board, hand=hand)
+
+
+_SHORTEST_RUNG_LINE: Final = 20
+"""The longest line the shortest rung of the ladder can produce: ``HS: full house 10/10``.
+
+Pinned here and proved exhaustively by
+:func:`test_every_hand_the_evaluator_can_rank_has_a_short_name_that_fits_the_ladder`,
+so the sweep over every shape of hand can bound a pop-up without having to find
+the hand that would make the longest one.
+"""
+
+_WORST_POP_UP: Final = 189
+"""The longest pop-up a flip can raise: 21 cards, 16 of them just dealt, three boards.
+
+Eleven characters inside the limit, which is the ladder's whole margin. A change
+that eats into it fails the sweep rather than quietly cutting somebody's cards.
+"""
+
+_BIG_READING: Final = (
+    _made(Board.BOARD1, "full house, queens full of sevens", "Qs Qh Qd 7s 7h"),
+    _made(Board.BOARD2, "four of a kind, queens", "Qs Qh Qd Qc 7s"),
+    _made(Board.HAND_STRENGTH, "straight flush, nine high", "9s 8s 7s 6s 5s"),
+)
+"""Three of the longest readings there are, for the cases where nothing else fits."""
+
+
+def _big_reading(boards: int) -> tuple[MadeHand, ...]:
+    """:data:`_BIG_READING` as a pop-up would hold it with ``boards`` community boards out."""
+    return _BIG_READING[:boards] + _BIG_READING[-1:]
 
 
 def test_a_peek_lists_only_the_hole_cards_before_the_extras_are_out() -> None:
     hole = _cards("As 10h 2c 3d 4h")
     text = render.render_peek(PeekAnswer(seat=1, hole=hole))
-    assert text.splitlines() == ["Your cards · seat 2 · 5 cards", "A♠ 10♥ 2♣ 3♦ 4♥"]
+    assert text.splitlines() == ["Your cards · seat 2 · 5 cards", "A♠ 10♥ 4♥ 3♦ 2♣"]
     assert "*" not in text
 
 
-def test_a_peek_marks_the_extra_cards() -> None:
+def test_a_peek_marks_the_extra_cards_wherever_they_sort() -> None:
     hole = _cards("As 10h 2c 3d 4h")
     extra = _cards("Kd Qs")
     text = render.render_peek(PeekAnswer(seat=0, hole=hole, extra=extra))
     assert text.splitlines() == [
         "Your cards · seat 1 · 7 cards",
-        "A♠ 10♥ 2♣ 3♦ 4♥ K♦* Q♠*",
+        "A♠ K♦* Q♠* 10♥ 4♥ 3♦ 2♣",
         "* just dealt",
     ]
+
+
+def test_a_hand_is_sorted_by_rank_and_then_by_suit_downwards() -> None:
+    hand = _cards("2c 2s 2h 2d Ac 10s 10c Kh")
+    text = render.render_peek(PeekAnswer(seat=0, hole=hand))
+    assert text.splitlines()[1] == "A♣ K♥ 10♠ 10♣ 2♠ 2♥ 2♦ 2♣"
+
+
+def test_the_ace_of_a_five_high_straight_still_sorts_at_the_top() -> None:
+    wheel = _cards("5c 4d 3h 2s Ac")
+    answer = PeekAnswer(
+        seat=0,
+        hole=wheel,
+        made=(_made(Board.HAND_STRENGTH, "straight, five high", "5c 4d 3h 2s Ac"),),
+    )
+    text = render.render_peek(answer)
+    assert text.splitlines()[1] == "A♣ 5♣ 4♦ 3♥ 2♠"
+    assert "Hand strength: straight, five high" in text
 
 
 def test_a_single_card_peek_is_not_pluralised() -> None:
@@ -1021,10 +1089,211 @@ def test_the_largest_hand_fits_in_the_popup() -> None:
     answer = PeekAnswer(seat=1, hole=hole, extra=extra)
     assert len(answer.cards) == 21
     text = render.render_peek(answer)
-    assert text.count("10") == 21
+    assert text.count("10") == 4
     assert text.count("*") == settings.y + 1
     assert len(text) < render.ALERT_LIMIT
     assert render.ALERT_LIMIT == 200
+
+
+# -------------------------------------------------------- what a hand has made
+
+
+def test_a_peek_names_what_the_hand_has_on_each_board_that_is_out() -> None:
+    answer = PeekAnswer(
+        seat=0,
+        hole=_cards("As Ks Qs 9s 7d"),
+        made=(
+            _made(Board.BOARD1, "flush, ace high", "As Ks Qs 9s 7s"),
+            _made(Board.BOARD2, "pair of nines", "9s 9c Ks Qs 7d"),
+            _made(Board.HAND_STRENGTH, "ace high", "As Ks Qs 9s 7d"),
+        ),
+    )
+    assert render.render_peek(answer).splitlines() == [
+        "Your cards · seat 1 · 5 cards",
+        "A♠ K♠ Q♠ 9♠ 7♦",
+        "Board 1: flush, ace high · A♠ K♠ Q♠ 9♠ 7♠",
+        "Board 2: pair of nines · 9♠ 9♣ K♠ Q♠ 7♦",
+        "Hand strength: ace high · A♠ K♠ Q♠ 9♠ 7♦",
+    ]
+
+
+def test_a_peek_before_any_board_is_out_says_only_what_the_hand_is_worth() -> None:
+    answer = PeekAnswer(
+        seat=2,
+        hole=_cards("As Ks Qs 9s 7d"),
+        made=(_made(Board.HAND_STRENGTH, "ace high", "As Ks Qs 9s 7d"),),
+    )
+    text = render.render_peek(answer)
+    assert text.splitlines()[-1] == "Hand strength: ace high · A♠ K♠ Q♠ 9♠ 7♦"
+    assert "Board 1" not in text
+    assert "Board 2" not in text
+
+
+def test_a_peek_that_could_not_be_read_still_shows_the_cards() -> None:
+    text = render.render_peek(PeekAnswer(seat=0, hole=_cards("As Ks Qs 9s 7d")))
+    assert text.splitlines() == ["Your cards · seat 1 · 5 cards", "A♠ K♠ Q♠ 9♠ 7♦"]
+
+
+def test_a_hand_too_big_for_the_cards_drops_to_the_names_alone() -> None:
+    hole, extra = _widest_hand(5, 4)
+    answer = PeekAnswer(seat=0, hole=hole, extra=extra, made=_BIG_READING)
+    lines = render.render_peek(answer).splitlines()
+    assert lines[-3:] == [
+        "Board 1: full house, queens full of sevens",
+        "Board 2: four of a kind, queens",
+        "Hand strength: straight flush, nine high",
+    ]
+    assert len(render.render_peek(answer)) <= render.ALERT_LIMIT
+
+
+def test_the_biggest_hand_of_all_drops_to_the_shortest_names() -> None:
+    hole, extra = _widest_hand(5, 16)
+    answer = PeekAnswer(seat=0, hole=hole, extra=extra, made=_BIG_READING)
+    text = render.render_peek(answer)
+    assert len(answer.cards) == 21
+    assert text.splitlines()[-3:] == [
+        "B1: full house Q/7",
+        "B2: quads Q",
+        "HS: str flush 9",
+    ]
+    assert len(text) <= render.ALERT_LIMIT
+    # The cards are never what gives way: all 21 of them are still there.
+    assert len(text.splitlines()[1].split()) == 21
+
+
+def test_a_royal_flush_is_named_as_one_and_shortens_to_a_word() -> None:
+    royal = _made(Board.BOARD1, "royal flush", "As Ks Qs Js 10s")
+    assert render._made_named(royal) == "Board 1: royal flush"
+    assert render._made_short(royal) == "B1: royal"
+
+
+@pytest.mark.parametrize(
+    ("cards", "long_form", "short_form"),
+    [
+        pytest.param("As Ks Qs Js 10s", "royal flush", "royal", id="royal"),
+        pytest.param("9s 8s 7s 6s 5s", "straight flush, nine high", "str flush 9", id="str-flush"),
+        pytest.param(
+            "5s 4s 3s 2s As", "straight flush, five high", "str flush 5", id="steel-wheel"
+        ),
+        pytest.param("Qs Qh Qd Qc 7s", "four of a kind, queens", "quads Q", id="quads"),
+        pytest.param(
+            "Qs Qh Qd 7s 7h", "full house, queens full of sevens", "full house Q/7", id="full-house"
+        ),
+        pytest.param("As Ks Qs 9s 7s", "flush, ace high", "flush A", id="flush"),
+        pytest.param("10s 9h 8d 7c 6s", "straight, ten high", "straight 10", id="straight"),
+        pytest.param("Qs Qh Qd 9s 7h", "three of a kind, queens", "trips Q", id="trips"),
+        pytest.param(
+            "Qs Qh 7d 7c 9s", "two pair, queens and sevens", "two pair Q/7", id="two-pair"
+        ),
+        pytest.param("Qs Qh 9d 7c 5s", "pair of queens", "pair Q", id="pair"),
+        pytest.param("As Kh 9d 7c 5s", "ace high", "A high", id="high-card"),
+        pytest.param("5s 4h 3d 2c As", "straight, five high", "straight 5", id="wheel"),
+    ],
+)
+def test_every_kind_of_hand_is_named_in_both_forms(
+    cards: str, long_form: str, short_form: str
+) -> None:
+    made = _made(Board.BOARD2, long_form, cards)
+    assert render._made_named(made) == f"Board 2: {long_form}"
+    assert render._made_short(made) == f"B2: {short_form}"
+
+
+def _legal_shapes() -> list[tuple[int, int, int]]:
+    """Every ``(players, private cards, extra cards)`` a flip can really deal.
+
+    Every private-card count in its limits, every player count that fits it, and
+    the extra cards each asking for 0 to :data:`~esgbot.game.rules.Y_MAX` of them
+    comes to -- which the deck decides, so many requests give the same hand.
+    """
+    shapes = {
+        (count, x, extra_rounds_for(player_count=count, x=x, y=y))
+        for x in range(X_MIN, X_MAX + 1)
+        for count in range(MIN_PLAYERS, max_players(x) + 1)
+        for y in range(Y_MIN, Y_MAX + 1)
+    }
+    return sorted(shapes)
+
+
+def test_every_shape_of_hand_a_flip_can_deal_fits_the_pop_up() -> None:
+    """The proof that the ladder has a bottom, over every hand a flip can deal.
+
+    Exhaustive over the shapes rather than the deals: every private-card count,
+    every player count that fits it, every extra-card count the deck allows,
+    every seat and every number of boards out, each with the longest-reading
+    hand of that size. Two things are checked of each. The pop-up as it really
+    renders fits and is never cut, with the longest readings there are; and the
+    arithmetic bound -- the head as it really renders, plus the longest line the
+    shortest rung can produce for *any* hand -- fits too, which is what says the
+    ladder never runs out of rungs whatever the cards come to.
+    """
+    worst = 0
+    for count, x, extra in _legal_shapes():
+        hole, held = _widest_hand(x, extra)
+        for seat in range(count):
+            bare = render.render_peek(PeekAnswer(seat=seat, hole=hole, extra=held))
+            for boards in range(BOARD_COUNT + 1):
+                made = _big_reading(boards)
+                where = f"{count} players, x={x}, extra={extra}, seat={seat}, boards={boards}"
+                text = render.render_peek(PeekAnswer(seat=seat, hole=hole, extra=held, made=made))
+                assert len(text) <= render.ALERT_LIMIT, f"{where}: {len(text)}"
+                assert not text.endswith("…"), f"{where}: no rung fitted"
+                assert len(text.splitlines()[1].split()) == x + extra, where
+                bound = len(bare) + len(made) * (1 + _SHORTEST_RUNG_LINE)
+                assert bound <= render.ALERT_LIMIT, f"{where}: {bound}"
+                worst = max(worst, bound)
+    assert worst == _WORST_POP_UP
+
+
+@pytest.mark.parametrize("sweep", range(8))
+def test_real_deals_of_every_size_fit_the_pop_up(sweep: int) -> None:
+    """The same limit over deals that were really dealt and really read.
+
+    The sweep above bounds the renderer; this one walks the whole path --
+    :func:`~esgbot.engine.read_hand` on a dealt hand, rendered -- across the
+    extremes of the deck: the biggest hands two players can hold, and the
+    smallest a full table can.
+    """
+    shapes = [(2, 5, Y_MAX), (2, 21, 0), (2, 16, 5), (3, 14, Y_MAX), (8, 5, 0), (4, 5, Y_MAX)]
+    count, x, y = shapes[sweep % len(shapes)]
+    extra = extra_rounds_for(player_count=count, x=x, y=y)
+    seed = (sweep * 7919 + 13).to_bytes(fairness.SEED_SIZE, "big")
+    deal = deal_cards(seed=seed, player_ids=list(range(count)), x=x, y=y)
+    assert deal.extra_count == extra
+    for hand in deal.hands:
+        for shown in range(len(deal.boards) + 1):
+            final = shown == len(deal.boards)
+            held = hand.extra if final else ()
+            answer = PeekAnswer(
+                seat=hand.seat,
+                hole=hand.hole,
+                extra=held,
+                made=read_hand(hand.hole + held, deal.boards[:shown]),
+            )
+            text = render.render_peek(answer)
+            assert len(text) <= render.ALERT_LIMIT, f"{count}p x={x} extra={extra}: {len(text)}"
+            assert len(text.splitlines()) == 2 + bool(held) + shown + 1
+
+
+def test_every_hand_the_evaluator_can_rank_has_a_short_name_that_fits_the_ladder() -> None:
+    """The shortest rung's worst line, over every rank the describer can be handed.
+
+    Exhaustive over the function's whole domain -- every category against every
+    pair of ranks, legal or not -- rather than over the hands a deck can make, so
+    the bound holds however the evaluator's tiebreaks are arranged next.
+    """
+    lines = [
+        render._made_short(MadeHand(board=board, hand=BestHand(rank=rank, cards=())))
+        for board in Board
+        for category in Category
+        for high in Rank
+        for low in Rank
+        for rank in [HandRank(category=category, tiebreak=(high, low, high, low, high))]
+    ]
+    longest = max(len(line) for line in lines)
+    assert longest == _SHORTEST_RUNG_LINE
+    assert {line for line in lines if len(line) == longest} == {
+        f"{mark}: full house 10/10" for mark in ("B1", "B2", "HS")
+    }
 
 
 # ---------------------------------------------------------------------- notices

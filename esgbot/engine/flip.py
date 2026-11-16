@@ -51,6 +51,15 @@ nobody could check. A Peek pressed earlier is answered as expired. A peek counts
 towards "everyone has peeked" only when the hand it showed was final and the
 pop-up carrying it actually went out.
 
+**A pop-up also says what the hand has made, and only against boards the group
+can see.** Every card is fixed at Start, so a hand read against a board still to
+come would say something about cards nobody has been shown; a board is read only
+once the table edit carrying it has come back. The reading itself runs in a
+worker thread, outside both locks -- the cards and the boards are snapshotted
+under the state lock, and the lock is let go before the work starts -- so a Peek
+is answered promptly however slow Telegram is, and several at once do not queue
+behind each other. See :meth:`Flip.peek` and :mod:`esgbot.engine.peek`.
+
 **Two locks, neither held while waiting.** The state lock is taken for the moment
 it takes to change something and never across a gateway call or a sleep, so a
 Peek press is answered at once however slow Telegram is being. The output lock
@@ -116,8 +125,8 @@ import asyncio
 import math
 import secrets
 import sqlite3
-from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final
@@ -125,6 +134,7 @@ from typing import Any, Final
 from esgbot.engine import timing
 from esgbot.engine.clock import Clock
 from esgbot.engine.gateway import Gateway, MessageTarget, PermanentFailureError
+from esgbot.engine.peek import HandReader, read_hand_in_thread
 from esgbot.engine.store import FlipStore
 from esgbot.engine.views import (
     BoardView,
@@ -133,6 +143,7 @@ from esgbot.engine.views import (
     HandView,
     LobbyStatus,
     LobbyView,
+    MadeHand,
     Notice,
     PeekAnswer,
     Player,
@@ -147,6 +158,7 @@ from esgbot.engine.views import (
     VoidView,
 )
 from esgbot.game import fairness
+from esgbot.game.cards import Card
 from esgbot.game.deal import Deal, deal_cards
 from esgbot.game.rules import MIN_PLAYERS, FlipRequest, Settings
 from esgbot.game.scoring import Board
@@ -304,6 +316,7 @@ class Flip:
 
     __slots__ = (
         "_activity",
+        "_boards_shown",
         "_cards_out",
         "_clock",
         "_closed",
@@ -326,6 +339,7 @@ class Flip:
         "_peeked",
         "_phase",
         "_players",
+        "_read_hand",
         "_request",
         "_round",
         "_run_task",
@@ -357,13 +371,15 @@ class Flip:
         clock: Clock,
         token: str | None = None,
         settle: Settler = settle_in_thread,
+        read_hand: HandReader = read_hand_in_thread,
         on_close: Callable[[Flip], None] | None = None,
     ) -> None:
         """Set a flip up without touching the gateway or the store.
 
         The registry calls this and then opens the flip, which is what posts the
-        lobby and writes its row. ``settle`` and ``token`` are seams for tests;
-        the defaults are what the bot runs.
+        lobby and writes its row. ``settle``, ``read_hand`` and ``token`` are
+        seams for tests; the defaults are what the bot runs, and both of the
+        first two put their work in a worker thread.
 
         ``settings`` is what the command asked for: a
         :class:`~esgbot.game.rules.FlipRequest` when it left ``Y`` or ``Z`` to
@@ -382,6 +398,7 @@ class Flip:
         self._store = store
         self._clock = clock
         self._settle = settle
+        self._read_hand = read_hand
         self._on_close = on_close
 
         self._phase = FlipPhase.LOBBY
@@ -396,6 +413,7 @@ class Flip:
         self._stage = TableStage.HOLE_CARDS
 
         self._cards_out = False
+        self._boards_shown = 0
         self._table_live = False
         self._told = False
         self._ending: _Ending | None = None
@@ -631,7 +649,7 @@ class Flip:
         return notice
 
     async def peek(self, user_id: int, *, press_id: str | None = None) -> PressAnswer:
-        """Show one player their own cards, and count the peek if they saw a final hand.
+        """Show one player their own cards and what they have made, and count the peek.
 
         Returns that player's :class:`~esgbot.engine.views.PeekAnswer`, or
         :attr:`~esgbot.engine.views.Notice.NOT_A_PLAYER` for somebody who is not
@@ -643,18 +661,52 @@ class Flip:
 
         A final hand counts only once the pop-up holding it has gone out. A
         pop-up that failed showed nobody anything, so counting it would let the
-        ten-second rule end the window on hands no player has seen.
+        ten-second rule end the window on hands no player has seen. What the
+        answer *says* makes no difference to that: the hand it carries is final
+        or it is not, and the reading below cannot change which.
 
-        This takes the state lock for an instant and never waits on the gateway
-        first, so it is answered promptly even mid-deal.
+        **Three things happen in this order, and only the first holds a lock.**
+        The cards the player holds now and the boards the table has already shown
+        are taken under the state lock, which is let go at once. The reading is
+        then worked out in a worker thread -- tens of milliseconds for a 21-card
+        hand -- with nothing held, so the round's timers keep their times, this
+        flip's output is unblocked and another player's Peek is answered
+        meanwhile rather than queued behind this one. Only then is the press
+        answered. A flip that ends in between is no obstacle: the hand was that
+        player's when they pressed, and the boards read against are on the table
+        either way, so the pop-up still goes out and whoever ended the flip still
+        owns what the group is told.
         """
         async with self._state_lock:
             answer, final = self._peek_answer(user_id)
+            boards = self._boards_out() if isinstance(answer, PeekAnswer) else ()
+        if isinstance(answer, PeekAnswer):
+            answer = replace(answer, made=await self._made_hands(answer.cards, boards))
         shown = await self._answer(press_id, answer)
         if final and shown:
             async with self._state_lock:
                 self._count_peek(user_id)
         return answer
+
+    async def _made_hands(
+        self, cards: Sequence[Card], boards: Sequence[Sequence[Card]]
+    ) -> tuple[MadeHand, ...]:
+        """What a hand has made, worked out off the event loop and outside both locks.
+
+        A reading that breaks costs the player those lines and not their cards:
+        the pop-up goes out with the hand alone, because a press nobody answers
+        leaves a spinner going on somebody's phone, and a Peek is the one thing
+        in a flip that no ending depends on. A cancellation -- the bot stopping
+        while a press is part way through -- is not a failure and is left to
+        carry on up.
+        """
+        try:
+            return await self._read_hand(cards, boards)
+        except Exception:
+            _logger.exception(
+                "flip %s: a hand could not be read; showing the cards alone", self._token
+            )
+            return ()
 
     # ------------------------------------------------------------ state changes
 
@@ -774,6 +826,17 @@ class Flip:
         final = self._hands_final
         answer = PeekAnswer(seat=seat, hole=hand.hole, extra=hand.extra if final else ())
         return answer, final
+
+    def _boards_out(self) -> tuple[tuple[Card, ...], ...]:
+        """The community boards the table has already shown, Board 1 first. Under the lock.
+
+        These are the only boards a hand may be read against. Every card is
+        fixed at Start, so a reading taken against a board the group has not seen
+        would say something about cards nobody has been shown -- and a board
+        counts as shown once the table edit carrying it has come back, not when
+        the round set out to make it.
+        """
+        return self._require_round().deal.boards[: self._boards_shown]
 
     def _count_peek(self, user_id: int) -> None:
         """Write down that this player has seen their final hand, under the state lock.
@@ -952,9 +1015,14 @@ class Flip:
             self._cards_out = True
         await self._show_table(TableStage.HOLE_CARDS)
         await self._show_table(TableStage.BOARD1)
+        async with self._state_lock:
+            # Board 1 is on the table, so a peek may now be told what the player
+            # has made on it. Not a moment earlier: see _boards_out.
+            self._boards_shown = 1
         await self._clock.sleep(timing.BOARD_GAP_SECONDS)
         await self._show_table(TableStage.BOARD2)
         async with self._state_lock:
+            self._boards_shown = 2
             # The extra cards go out now, which is the last card dealt and the
             # moment every hand is final, so both peek deadlines run from here.
             self._hands_final = True

@@ -41,6 +41,7 @@ from esgbot.engine import timing
 from esgbot.engine.clock import Clock, SystemClock
 from esgbot.engine.flip import Flip, Settler, settle_in_thread
 from esgbot.engine.gateway import Gateway
+from esgbot.engine.peek import HandReader, read_hand_in_thread
 from esgbot.engine.store import FlipStore
 from esgbot.engine.views import Player, VoidReason
 from esgbot.game.rules import FlipRequest, Settings
@@ -76,6 +77,7 @@ class FlipRegistry:
         "_clock",
         "_gateway",
         "_moved",
+        "_read_hand",
         "_settle",
         "_store",
         "_voiding",
@@ -88,16 +90,19 @@ class FlipRegistry:
         store: FlipStore,
         clock: Clock | None = None,
         settle: Settler = settle_in_thread,
+        read_hand: HandReader = read_hand_in_thread,
     ) -> None:
         """Hold the parts every flip in this process shares.
 
-        ``clock`` defaults to the real one and ``settle`` to the worker-thread
-        showdown; tests replace both.
+        ``clock`` defaults to the real one, and ``settle`` and ``read_hand`` to
+        the worker-thread showdown and the worker-thread peek reading; tests
+        replace all three.
         """
         self._gateway = gateway
         self._store = store
         self._clock: Clock = SystemClock() if clock is None else clock
         self._settle = settle
+        self._read_hand = read_hand
         self._by_group: dict[int, Flip] = {}
         self._by_token: dict[str, Flip] = {}
         self._moved: dict[int, int] = {}
@@ -197,6 +202,7 @@ class FlipRegistry:
             clock=self._clock,
             token=token,
             settle=self._settle,
+            read_hand=self._read_hand,
             on_close=self._forget,
         )
         # Claimed before the first await, so two /flip commands cannot race in.

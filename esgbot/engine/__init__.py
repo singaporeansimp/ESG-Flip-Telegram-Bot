@@ -20,6 +20,11 @@ Running a flip::
     await flip.start(starter.user_id, press_id=press.id)   # the round runs itself
     await flip.wait_closed()
 
+The two expensive things in a flip -- working out the result, and reading what a
+hand has made for a Peek pop-up -- are done in a worker thread, and both are
+seams a test replaces: see :func:`~esgbot.engine.flip.settle_in_thread` and
+:mod:`esgbot.engine.peek`.
+
 Every button press goes to :meth:`~esgbot.engine.flip.Flip.join`,
 :meth:`~esgbot.engine.flip.Flip.leave`, :meth:`~esgbot.engine.flip.Flip.start`,
 :meth:`~esgbot.engine.flip.Flip.cancel` or
@@ -37,6 +42,7 @@ peeked.
 from esgbot.engine.clock import Clock, SystemClock
 from esgbot.engine.flip import Flip, FlipPhase, Settler, new_token, settle_in_thread
 from esgbot.engine.gateway import Gateway, MessageTarget, PermanentFailureError
+from esgbot.engine.peek import HandReader, read_hand, read_hand_in_thread
 from esgbot.engine.registry import FlipAlreadyOpenError, FlipRegistry
 from esgbot.engine.store import FlipStore
 from esgbot.engine.views import (
@@ -46,6 +52,7 @@ from esgbot.engine.views import (
     HandView,
     LobbyStatus,
     LobbyView,
+    MadeHand,
     Notice,
     PeekAnswer,
     Player,
@@ -71,9 +78,11 @@ __all__ = [
     "FlipStore",
     "FlipView",
     "Gateway",
+    "HandReader",
     "HandView",
     "LobbyStatus",
     "LobbyView",
+    "MadeHand",
     "MessageTarget",
     "Notice",
     "PeekAnswer",
@@ -91,5 +100,7 @@ __all__ = [
     "VoidReason",
     "VoidView",
     "new_token",
+    "read_hand",
+    "read_hand_in_thread",
     "settle_in_thread",
 ]

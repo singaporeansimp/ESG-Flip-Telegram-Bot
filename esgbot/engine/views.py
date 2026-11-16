@@ -25,7 +25,9 @@ One message each:
 a card count per seat and nothing else, and the engine's own tests walk every
 view of a full flip to prove it. The one piece of private data the engine hands
 out is a :class:`PeekAnswer`, which goes to one player as the answer to their own
-button press and never into the group.
+button press and never into the group. It carries their cards and, in
+:class:`MadeHand`, what those cards have made -- on the boards the table has
+already shown, and never on one still to come.
 
 Seats are the players' join order, as everywhere in :mod:`esgbot.game`, and
 ``seat`` fields index :attr:`TableView.seats`, :attr:`ShowdownView.hands` and
@@ -40,6 +42,7 @@ from enum import IntEnum, StrEnum
 from fractions import Fraction
 
 from esgbot.game.cards import Card
+from esgbot.game.evaluator import BestHand
 from esgbot.game.rules import FlipRequest, Settings
 from esgbot.game.scoring import Board
 from esgbot.game.settlement import Payment
@@ -51,6 +54,7 @@ __all__ = [
     "HandView",
     "LobbyStatus",
     "LobbyView",
+    "MadeHand",
     "Notice",
     "PeekAnswer",
     "Player",
@@ -134,6 +138,22 @@ class Notice(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class MadeHand:
+    """The best five cards a player has on one board, for their own pop-up.
+
+    ``board`` says which board it is: one of the two community boards, played
+    with exactly two of the player's cards and three of the board's five, or
+    :attr:`~esgbot.game.scoring.Board.HAND_STRENGTH`, played out of the player's
+    own cards alone. ``hand`` is the evaluator's own record of the five cards it
+    chose and what they are worth, so a pop-up names a hand exactly as the
+    showdown will.
+    """
+
+    board: Board
+    hand: BestHand
+
+
+@dataclass(frozen=True, slots=True)
 class PeekAnswer:
     """One player's own cards, for the pop-up their Peek press raises.
 
@@ -141,11 +161,22 @@ class PeekAnswer:
     whose cards they are. Before the extra cards are dealt ``extra`` is empty,
     which is how the Telegram layer knows to show the hole cards alone; once they
     are out it holds them, and they are the cards to mark as new.
+
+    ``made`` is what the cards in *this* answer come to, one
+    :class:`MadeHand` per board the player may be told about, in
+    :class:`~esgbot.game.scoring.Board` order: the community boards the table has
+    already shown, and then the hand-strength board, which is always there
+    because it is played out of the player's own cards. So it holds one entry
+    before any board is out, two once Board 1 is, three once both are -- and
+    never a word about a board still to come, whose cards are fixed but unseen.
+    It is empty when the reading could not be made at all; see
+    :meth:`esgbot.engine.flip.Flip.peek`.
     """
 
     seat: int
     hole: tuple[Card, ...]
     extra: tuple[Card, ...] = ()
+    made: tuple[MadeHand, ...] = ()
 
     @property
     def cards(self) -> tuple[Card, ...]:

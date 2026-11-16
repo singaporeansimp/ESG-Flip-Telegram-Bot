@@ -132,9 +132,11 @@ in a group with no finished flips, `/again` says so and suggests `/flip`.
 The lobby's **Join**, **Leave**, **Start** and **Cancel** buttons run the rest. Only whoever
 opened the flip can Start or Cancel it, and a lobby closes itself after ten minutes with no joins
 or leaves. Once the round starts, the one button left is **Peek**, which shows a player their own
-cards in a private pop-up — no direct chat with the bot needed. Peek works from the moment the
+cards — sorted, highest first — and what those cards have made on each board that is out, in a
+private pop-up; no direct chat with the bot needed. Peek works from the moment the
 deck commitment is posted, so no hand is ever shown before the group has been told which deck it
-came from.
+came from, and a hand is only ever read against a board the group has already been shown. Press
+it again after the extra cards to see the hand grow.
 
 ### What the bot says
 
@@ -206,7 +208,44 @@ Check it with /verify 42
 
 The names above are made up; the seed is shown in full, as it always is.
 
-Every other message — the showdown, a void notice, the peek pop-up, each usage line, the
+The **Peek pop-up**, which only the player who pressed it ever sees. It is a plain-text alert, so
+it has 200 characters for everything, and it is the one message in the bot with no room to spare:
+
+```
+Your cards · seat 2 · 7 cards
+A♣* K♦ J♦ 10♦ 4♠ 2♠* 2♣
+* just dealt
+Board 1: two pair, aces and eights
+Board 2: two pair, kings and threes
+Hand strength: pair of twos
+```
+
+The cards come highest first — rank before suit, ace high, and spades, hearts, diamonds, clubs
+within a rank — with the ones just dealt marked `*`. A rank is a rank whatever it goes on to
+make, so the ace of a five-high straight still sorts at the top.
+
+Then one line per board, scored exactly as the showdown will score it: the two community boards
+with **exactly two** of the player's cards and three of that board's five, and hand strength from
+the best five of the player's own cards. **Only the boards the group has already been shown are
+read.** Every card is fixed at Start, so a line about a board still to come would be a hint at
+cards nobody has seen — before Board 1 lands the pop-up has the hand-strength line alone, and it
+grows as the table does.
+
+A big hand leaves little room for words, so the readings are written in the roomiest form that
+fits inside the limit: the hand named with the five cards it is made of, else the hand named, else
+cut to the bone. The cards themselves and the three lines are never what gives way — the largest
+hand a flip can deal, 21 cards with 16 of them just dealt, comes out like this:
+
+```
+Your cards · seat 1 · 21 cards
+K♣ Q♠* Q♦* 10♥* 10♣* 9♥ 9♦* 8♦* 7♥* 7♦* 6♥ 6♣* 5♠* 5♣* 4♠ 3♥* 3♦* 3♣* 2♠* 2♥* 2♣
+* just dealt
+B1: flush Q
+B2: full house 8/5
+HS: full house 3/Q
+```
+
+Every other message — the showdown, a void notice, each usage line, the
 leaderboard, `/stats`, `/verify` — is in `tests/samples.py`, which renders the lot from real
 flips:
 
@@ -443,7 +482,8 @@ what: a flip that is recorded stays recorded and `/verify <number>` can always c
 esgbot/
   game/          cards, fairness, deal, rules, evaluator, scoring, settlement
                                                    (pure logic, no Telegram or SQLite)
-  engine/        one flip's state machine, its timers, one flip per group
+  engine/        one flip's state machine, its timers, one flip per group, and what a
+                                                     Peek pop-up says a hand has made
   telegram/      commands, rendering, buttons, gateway, startup sweep
   storage/       SQLite schema, finished flips, flips in progress, stats queries,
                                                    each group's last flip settings

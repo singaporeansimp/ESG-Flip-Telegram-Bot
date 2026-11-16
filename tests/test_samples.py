@@ -98,11 +98,18 @@ def test_every_pop_up_fits_the_alert_limit() -> None:
 
 
 def test_the_largest_hand_a_flip_can_deal_still_fits_a_pop_up() -> None:
-    biggest = max(
-        (sample for sample in _alerts() if sample.section == "Peek"),
-        key=lambda sample: len(sample.text),
-    )
-    assert "21 cards" in biggest.text
+    """The one pop-up with no room to spare: every card shown, every board still named.
+
+    A longer pop-up than this one exists -- the readings are written in the
+    roomiest form that fits, so a small hand fills the same 200 characters with
+    nicer words -- but this is the hand that has the least room for them, and
+    what gives way is the wording and never a card or a line.
+    """
+    (biggest,) = [sample for sample in _alerts() if " 21 cards" in sample.text]
+    _, hand, legend, *made = biggest.text.splitlines()
+    assert len(hand.split()) == 21
+    assert legend == "* just dealt"
+    assert [line.split(":")[0] for line in made] == ["B1", "B2", "HS"]
     assert len(biggest.text) <= render.ALERT_LIMIT
 
 

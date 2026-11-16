@@ -59,7 +59,14 @@ from esgbot.telegram.gateway import (
     TelegramGateway,
 )
 from esgbot.telegram.handlers import build_router
-from tests.engine_helpers import GROUP, SETTINGS, FakeClock, FakeStore, settle_inline
+from tests.engine_helpers import (
+    GROUP,
+    SETTINGS,
+    FakeClock,
+    FakeStore,
+    read_inline,
+    settle_inline,
+)
 
 __all__ = [
     "BOT_TOKEN",
@@ -756,7 +763,9 @@ def bot_harness(
     client = FakeTelegram() if client is None else client
     store = FakeDatabase()
     gateway = TelegramGateway(client, clock=sends_clock, retry_delay=retry_delay)
-    registry = FlipRegistry(gateway=gateway, store=store, clock=clock, settle=settle_inline)
+    registry = FlipRegistry(
+        gateway=gateway, store=store, clock=clock, settle=settle_inline, read_hand=read_inline
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(registry=registry, gateway=gateway, store=store))
     return BotHarness(
