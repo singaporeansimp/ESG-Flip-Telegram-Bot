@@ -50,6 +50,7 @@ from esgbot.logging_setup import get_logger
 from esgbot.storage.errors import CorruptRecordError
 from esgbot.storage.models import (
     ActiveFlip,
+    AutoJoiner,
     FinishedFlip,
     FlipPlayer,
     FlipState,
@@ -62,6 +63,9 @@ from esgbot.storage.models import (
 __all__ = [
     "DEFAULT_LEADERBOARD_LIMIT",
     "add_active_flip",
+    "autojoin_limit",
+    "autojoiners",
+    "clear_autojoin",
     "fetch_flip",
     "last_flip_request",
     "leaderboard",
@@ -71,6 +75,7 @@ __all__ = [
     "player_stats_by_username",
     "record_flip",
     "remove_active_flip",
+    "set_autojoin",
     "transaction",
     "update_active_flip",
 ]
@@ -563,14 +568,109 @@ def player_stats_by_username(
         return player_stats(connection, group_id=group_id, user_id=user_id)
 
 
+def set_autojoin(connection: sqlite3.Connection, *, group_id: int, joiner: AutoJoiner) -> None:
+    """Put this player into this group's flips up to ``joiner.max_wager``.
+
+    Asking again replaces the wager and the name and keeps the player's place in
+    the order :func:`autojoiners` seats people in.
+    """
+    with transaction(connection):
+        connection.execute(
+            """
+            INSERT INTO autojoin (group_id, user_id, max_wager, display_name, username)
+            VALUES (:group_id, :user_id, :max_wager, :display_name, :username)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                max_wager = excluded.max_wager,
+                display_name = excluded.display_name,
+                username = excluded.username
+            """,
+            {
+                "group_id": group_id,
+                "user_id": joiner.user_id,
+                "max_wager": joiner.max_wager,
+                "display_name": joiner.display_name,
+                "username": joiner.username,
+            },
+        )
+
+
+def clear_autojoin(connection: sqlite3.Connection, *, group_id: int, user_id: int) -> bool:
+    """Stop putting this player into this group's flips. ``False`` if they never asked."""
+    with transaction(connection):
+        cursor = connection.execute(
+            "DELETE FROM autojoin WHERE group_id = :group_id AND user_id = :user_id",
+            {"group_id": group_id, "user_id": user_id},
+        )
+    return cursor.rowcount > 0
+
+
+def autojoin_limit(connection: sqlite3.Connection, *, group_id: int, user_id: int) -> int | None:
+    """The wager this player auto-joins up to in this group, or ``None`` if they do not.
+
+    Raises:
+        CorruptRecordError: if the row is there but its wager is not a whole number.
+    """
+    row = connection.execute(
+        "SELECT max_wager FROM autojoin WHERE group_id = :group_id AND user_id = :user_id",
+        {"group_id": group_id, "user_id": user_id},
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return _whole(row["max_wager"], "max_wager")
+    except (ValueError, TypeError) as error:
+        raise CorruptRecordError(
+            f"auto-join of player {user_id} in group {group_id}", str(error)
+        ) from error
+
+
+def autojoiners(
+    connection: sqlite3.Connection, *, group_id: int, wager: int
+) -> tuple[AutoJoiner, ...]:
+    """Who auto-joins a flip at this wager in this group, in the order they first asked.
+
+    A player is in when the wager is no more than the one they named. A damaged
+    row is left out rather than raised: one bad row should cost that player
+    their seat, not the group its flip.
+    """
+    rows = connection.execute(
+        """
+        SELECT user_id, max_wager, display_name, username
+        FROM autojoin
+        WHERE group_id = :group_id AND max_wager >= :wager
+        ORDER BY rowid
+        """,
+        {"group_id": group_id, "wager": wager},
+    ).fetchall()
+    joiners = []
+    for row in rows:
+        try:
+            user_id = _whole(row["user_id"], "user_id")
+            max_wager = _whole(row["max_wager"], "max_wager")
+            name = row["display_name"]
+            username = row["username"]
+            if not isinstance(name, str) or not name:
+                raise TypeError(f"display_name is {name!r}")
+            if username is not None and not isinstance(username, str):
+                raise TypeError(f"username is {username!r}")
+        except (ValueError, TypeError) as error:
+            _logger.warning("skipping a damaged auto-join row in group %d: %s", group_id, error)
+            continue
+        joiners.append(
+            AutoJoiner(user_id=user_id, display_name=name, username=username, max_wager=max_wager)
+        )
+    return tuple(joiners)
+
+
 def migrate_group_id(
     connection: sqlite3.Connection, *, old_group_id: int, new_group_id: int
 ) -> GroupMigration:
     """Move a group's history and in-progress flips to its new id.
 
-    Telegram changes the id when a group becomes a supergroup. All three tables
-    move in one transaction, so stats, any open flip and the settings ``/again``
-    repeats stay together.
+    Telegram changes the id when a group becomes a supergroup. Every table
+    moves in one transaction, so stats, any open flip, the settings ``/again``
+    repeats and everybody's ``/autojoin`` stay together. A player with an
+    auto-join row under both ids keeps the new id's.
 
     The last-flip row is one per group, so the two ids could in principle each
     have one. **The more recently set of the two is kept**, and a tie keeps the
@@ -601,6 +701,10 @@ def migrate_group_id(
             "UPDATE active_flips SET group_id = :new WHERE group_id = :old", parameters
         ).rowcount
         _move_last_flip(connection, parameters)
+        connection.execute(
+            "UPDATE OR IGNORE autojoin SET group_id = :new WHERE group_id = :old", parameters
+        )
+        connection.execute("DELETE FROM autojoin WHERE group_id = :old", parameters)
     migration = GroupMigration(flips=flips, active_flips=actives)
     if migration.rows:
         _logger.info(

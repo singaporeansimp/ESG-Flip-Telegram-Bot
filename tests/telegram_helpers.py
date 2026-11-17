@@ -44,6 +44,7 @@ from esgbot.game.rules import FlipRequest
 from esgbot.storage import (
     DEFAULT_LEADERBOARD_LIMIT,
     ActiveFlip,
+    AutoJoiner,
     FinishedFlip,
     FlipState,
     GroupMigration,
@@ -420,7 +421,8 @@ class FakeDatabase(FakeStore):
     Nothing here blocks: an in-memory connection never waits on a disk, so the
     queries run inline and the clock still only moves when a test moves it.
 
-    Set ``list_error``, ``migrate_error``, ``stats_error`` or ``fetch_error`` to
+    Set ``list_error``, ``migrate_error``, ``stats_error``, ``fetch_error`` or
+    ``autojoin_error`` to
     the exception that call should raise. For damage rather than failure, write
     to :attr:`connection` directly -- ``PRAGMA ignore_check_constraints = ON``
     first, as the storage tests do -- which is how a test tampers with a stored
@@ -434,6 +436,7 @@ class FakeDatabase(FakeStore):
     """
 
     __slots__ = (
+        "autojoin_error",
         "connection",
         "fetch_error",
         "last_flip_error",
@@ -450,6 +453,7 @@ class FakeDatabase(FakeStore):
         self.connection = schema.connect(":memory:")
         schema.apply_migrations(self.connection)
         self.list_error: Exception | None = None
+        self.autojoin_error: Exception | None = None
         self.migrate_error: Exception | None = None
         self.stats_error: Exception | None = None
         self.fetch_error: Exception | None = None
@@ -531,6 +535,36 @@ class FakeDatabase(FakeStore):
             self.last_flip_reached.set()
             await go.wait()
         return request
+
+    # ---------------------------------------------------------------- auto-join
+
+    async def set_autojoin(self, *, group_id: int, joiner: AutoJoiner) -> None:
+        """Keep what a player asked ``/autojoin`` for, with the real statement."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        queries.set_autojoin(self.connection, group_id=group_id, joiner=joiner)
+
+    async def clear_autojoin(self, *, group_id: int, user_id: int) -> bool:
+        """Forget it again, with the real statement."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        return queries.clear_autojoin(self.connection, group_id=group_id, user_id=user_id)
+
+    async def autojoin_limit(self, *, group_id: int, user_id: int) -> int | None:
+        """What one player has set, by the real query."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        return queries.autojoin_limit(self.connection, group_id=group_id, user_id=user_id)
+
+    async def autojoiners(self, *, group_id: int, wager: int) -> tuple[AutoJoiner, ...]:
+        """Who a new lobby seats, by the real query."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        return queries.autojoiners(self.connection, group_id=group_id, wager=wager)
 
     # -------------------------------------------------------- the whole group
 

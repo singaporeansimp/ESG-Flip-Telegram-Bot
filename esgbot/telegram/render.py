@@ -345,6 +345,24 @@ NO_FLIP_TO_REPEAT: Final = (
 never recorded, so it is not a flip this group has played."""
 
 
+AUTOJOIN_USAGE: Final = (
+    "<b>Join this group's flips automatically</b>\n"
+    "<code>/autojoin &lt;wager&gt;</code> — for example <code>/autojoin 50</code> puts you "
+    "into every flip here with a wager of $50 or less\n"
+    "<code>/autojoin off</code> — stop\n"
+    "<code>/autojoin</code> — what you have set"
+)
+"""How to write ``/autojoin``, shown when what came after it cannot be read."""
+
+AUTOJOIN_OFF: Final = "Auto-join is off. You will only be in flips you join yourself."
+
+AUTOJOIN_NOT_ON: Final = f"You have auto-join off in this group.\n\n{AUTOJOIN_USAGE}"
+
+AUTOJOIN_TROUBLE: Final = (
+    "I could not do that: the database is not available right now.\nTry again in a moment."
+)
+
+
 # --------------------------------------------------------------------- plumbing
 
 
@@ -1044,6 +1062,32 @@ def render_already_open(request: FlipRequest, settings: Settings | None = None) 
         ["⚠️ <b>A flip is already open here</b>", what],
         ["Join that one, or wait for it to finish, before starting another."],
     )
+
+
+def render_autojoin(max_wager: int) -> str:
+    """What a player has asked for with ``/autojoin``, and what it lets them in for.
+
+    The same words answer setting it and asking what is set. The wager is not
+    the most a flip can cost, and somebody who is seated without pressing
+    anything is the one person who has to be told so.
+    """
+    return _block(
+        [
+            "✅ <b>Auto-join is on</b>",
+            f"You will be put into every flip in this group with a wager of "
+            f"{_amount(max_wager)} or less, as long as there is a seat.",
+        ],
+        [
+            "You can still press Leave before a flip starts. A scoop can cost you more "
+            "than the wager.",
+            "<code>/autojoin off</code> stops it.",
+        ],
+    )
+
+
+def render_autojoin_error(error: SettingsError) -> str:
+    """What is wrong with the wager ``/autojoin`` was given, and how to write it."""
+    return f"⚠️ {settings_error_text(error)}\n\n{AUTOJOIN_USAGE}"
 
 
 # ----------------------------------------------------------------------- stats

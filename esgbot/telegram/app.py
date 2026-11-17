@@ -62,6 +62,10 @@ COMMANDS: Final = (
         description="Start a flip: /flip <wager> <private cards> [extra cards] [scoop multiplier]",
     ),
     BotCommand(command="again", description="Repeat this group's last flip, same settings"),
+    BotCommand(
+        command="autojoin",
+        description="Join flips here automatically: /autojoin <wager>, or /autojoin off",
+    ),
     BotCommand(command="leaderboard", description="Top players in this group by net winnings"),
     BotCommand(command="stats", description="Your stats, or /stats @name, or reply to someone"),
     BotCommand(command="verify", description="Check a finished flip: /verify <flip number>"),

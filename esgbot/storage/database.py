@@ -43,6 +43,7 @@ from esgbot.logging_setup import get_logger
 from esgbot.storage import queries, schema
 from esgbot.storage.models import (
     ActiveFlip,
+    AutoJoiner,
     FinishedFlip,
     FlipState,
     GroupMigration,
@@ -255,6 +256,34 @@ class Database:
             lambda connection: queries.player_stats_by_username(
                 connection, group_id=group_id, username=username
             )
+        )
+
+    async def set_autojoin(self, *, group_id: int, joiner: AutoJoiner) -> None:
+        """Put this player into this group's flips up to ``joiner.max_wager``."""
+        await self._run(
+            lambda connection: queries.set_autojoin(connection, group_id=group_id, joiner=joiner)
+        )
+
+    async def clear_autojoin(self, *, group_id: int, user_id: int) -> bool:
+        """Stop auto-joining this player here. ``False`` if they never asked."""
+        return await self._run(
+            lambda connection: queries.clear_autojoin(
+                connection, group_id=group_id, user_id=user_id
+            )
+        )
+
+    async def autojoin_limit(self, *, group_id: int, user_id: int) -> int | None:
+        """The wager this player auto-joins up to in this group, or ``None``."""
+        return await self._run(
+            lambda connection: queries.autojoin_limit(
+                connection, group_id=group_id, user_id=user_id
+            )
+        )
+
+    async def autojoiners(self, *, group_id: int, wager: int) -> tuple[AutoJoiner, ...]:
+        """Who auto-joins a flip at this wager in this group, first asker first."""
+        return await self._run(
+            lambda connection: queries.autojoiners(connection, group_id=group_id, wager=wager)
         )
 
     async def migrate_group_id(self, *, old_group_id: int, new_group_id: int) -> GroupMigration:

@@ -35,6 +35,7 @@ from esgbot.game.rules import Y_DEFAULT, FlipRequest, Settings
 __all__ = [
     "COMMITMENT_LENGTH",
     "ActiveFlip",
+    "AutoJoiner",
     "FinishedFlip",
     "FlipPlayer",
     "FlipState",
@@ -308,3 +309,16 @@ class GroupMigration:
     def rows(self) -> int:
         """Rows moved in total."""
         return self.flips + self.active_flips
+
+
+@dataclass(frozen=True, slots=True)
+class AutoJoiner:
+    """One player who asked to be put into a group's flips up to a wager.
+
+    The name is the one they had when they asked.
+    """
+
+    user_id: int
+    display_name: str
+    username: str | None
+    max_wager: int

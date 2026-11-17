@@ -1,6 +1,6 @@
 """The database file: how it is opened, and the tables inside it.
 
-Four tables:
+Five tables:
 
 ``flips``
     One row per finished flip, holding its settings, the seed and commitment, the
@@ -21,6 +21,12 @@ Four tables:
     it is a record of its own rather than a question asked of ``flips`` -- a
     group's last settings are a fact the bot keeps, not one it works out again
     each time.
+``autojoin``
+    One row per player per group who has asked, with ``/autojoin``, to be put
+    into every flip there whose wager is no more than ``max_wager``. The name is
+    kept as it was when they asked, because a lobby that seats them has no
+    message of theirs to read it from. Rows keep the order they were first
+    written in, which is the order they are seated in.
 
 Only finished flips reach ``flips`` and ``group_last_flip``, so cancelled and
 voided flips are absent from stats, and from ``/again``, by construction rather
@@ -66,7 +72,7 @@ __all__ = [
     "schema_version",
 ]
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 """The newest schema version this code understands."""
 
 BUSY_TIMEOUT_MS: Final = 5_000
@@ -169,7 +175,21 @@ _MIGRATION_2: Final[tuple[str, ...]] = (
     """,
 )
 
-_MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_MIGRATION_1, _MIGRATION_2)
+# Version 3 adds the ``/autojoin`` table. Nothing is backfilled: nobody has asked.
+_MIGRATION_3: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE autojoin (
+        group_id     INTEGER NOT NULL,
+        user_id      INTEGER NOT NULL,
+        max_wager    INTEGER NOT NULL CHECK (max_wager BETWEEN {WAGER_MIN} AND {WAGER_MAX}),
+        display_name TEXT NOT NULL,
+        username     TEXT,
+        PRIMARY KEY (group_id, user_id)
+    )
+    """,
+)
+
+_MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3)
 
 _logger = get_logger(__name__)
 

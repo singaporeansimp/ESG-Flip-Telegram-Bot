@@ -14,6 +14,11 @@ again and settles on this table rather than on the last one. Both commands open
 their lobby through the same call, which is what makes every rule about starting
 a flip hold for either of them.
 
+``/autojoin`` is a player asking to be put into every flip in this group up to a
+wager. Storage keeps what they asked for, and the one call that opens a lobby
+reads who that is for the wager in hand and seats them with the starter, so a
+flip from ``/again`` seats them exactly as one from ``/flip`` does.
+
 ``/leaderboard``, ``/stats`` and ``/verify`` read finished flips back out. They
 are all scoped to the group the command was sent in: a flip number or a player
 from another group is simply not there. ``/stats`` is about a ``@name`` given in
@@ -61,10 +66,18 @@ from esgbot.engine import (
     PermanentFailureError,
     Player,
 )
-from esgbot.game.rules import FlipRequest, SettingsError, parse_flip_request
+from esgbot.game.rules import (
+    WAGER_MAX,
+    WAGER_MIN,
+    FlipRequest,
+    SettingsError,
+    parse_flip_request,
+    parse_whole_number,
+)
 from esgbot.logging_setup import get_logger
 from esgbot.storage import (
     DEFAULT_LEADERBOARD_LIMIT,
+    AutoJoiner,
     CorruptRecordError,
     GroupMigration,
     PlayerStats,
@@ -126,6 +139,22 @@ class CommandStore(MigrationStore, Protocol):
 
     async def last_flip_request(self, group_id: int) -> FlipRequest | None:
         """What the last flip this group finished was asked for, or ``None``."""
+        ...
+
+    async def set_autojoin(self, *, group_id: int, joiner: AutoJoiner) -> None:
+        """Put this player into this group's flips up to a wager."""
+        ...
+
+    async def clear_autojoin(self, *, group_id: int, user_id: int) -> bool:
+        """Stop doing that. ``False`` if they never asked."""
+        ...
+
+    async def autojoin_limit(self, *, group_id: int, user_id: int) -> int | None:
+        """The wager this player auto-joins up to here, or ``None``."""
+        ...
+
+    async def autojoiners(self, *, group_id: int, wager: int) -> tuple[AutoJoiner, ...]:
+        """Who auto-joins a flip at this wager here, first asker first."""
         ...
 
 
@@ -248,10 +277,27 @@ def build_router(
         holds for ``/again`` exactly as it does for ``/flip``.
         """
         try:
+            joiners = await store.autojoiners(
+                group_id=registry.group_id_for(target.group_id), wager=request.wager
+            )
+        except (StorageError, sqlite3.Error) as error:
+            # Nobody typed anything to be seated, so nobody is owed a complaint:
+            # the flip opens with whoever started it and the rest can press Join.
+            _logger.error("could not read group %d's auto-joins: %s", target.group_id, error)
+            joiners = ()
+        try:
             await registry.create_flip(
                 group_id=target.group_id,
                 topic_id=target.topic_id,
                 starter=_player(user),
+                also_seated=[
+                    Player(
+                        user_id=joiner.user_id,
+                        display_name=joiner.display_name,
+                        username=joiner.username,
+                    )
+                    for joiner in joiners
+                ],
                 settings=request,
             )
         except FlipAlreadyOpenError as already:
@@ -329,6 +375,56 @@ def build_router(
             await gateway.say(target, render.NO_FLIP_TO_REPEAT)
             return
         await open_lobby(target, user, request)
+
+    @router.message(Command("autojoin"))
+    async def auto_join(message: Message, command: CommandObject) -> None:
+        """``/autojoin <wager>``, ``/autojoin off``, or ``/autojoin`` to see what is set.
+
+        A player who has named a wager is put into every flip this group opens
+        at that wager or less, from the lobby's first message. It is theirs
+        alone and this group's alone, and it does nothing to a lobby that is
+        already open.
+        """
+        user = message.from_user
+        if user is None:
+            return
+        target = _target(message)
+        if not _in_group(message):
+            await gateway.say(target, render.NO_FLIP_IN_PRIVATE)
+            return
+        group_id = registry.group_id_for(target.group_id)
+        wanted = (command.args or "").split()
+        if len(wanted) > 1:
+            await gateway.say(target, render.AUTOJOIN_USAGE)
+            return
+        try:
+            if not wanted:
+                limit = await store.autojoin_limit(group_id=group_id, user_id=user.id)
+                reply = render.AUTOJOIN_NOT_ON if limit is None else render.render_autojoin(limit)
+            elif wanted[0].lower() == "off":
+                await store.clear_autojoin(group_id=group_id, user_id=user.id)
+                reply = render.AUTOJOIN_OFF
+            else:
+                limit = parse_whole_number(
+                    wanted[0], field="Wager", minimum=WAGER_MIN, maximum=WAGER_MAX
+                )
+                player = _player(user)
+                await store.set_autojoin(
+                    group_id=group_id,
+                    joiner=AutoJoiner(
+                        user_id=player.user_id,
+                        display_name=player.display_name,
+                        username=player.username,
+                        max_wager=limit,
+                    ),
+                )
+                reply = render.render_autojoin(limit)
+        except SettingsError as error:
+            reply = render.render_autojoin_error(error)
+        except (StorageError, sqlite3.Error) as error:
+            _logger.error("could not read or set an auto-join in group %d: %s", group_id, error)
+            reply = render.AUTOJOIN_TROUBLE
+        await gateway.say(target, reply)
 
     @router.message(Command("leaderboard"))
     async def show_leaderboard(message: Message) -> None:

@@ -366,6 +366,7 @@ class Flip:
         topic_id: int | None,
         settings: Settings | FlipRequest,
         starter: Player,
+        also_seated: Sequence[Player] = (),
         gateway: Gateway,
         store: FlipStore,
         clock: Clock,
@@ -386,6 +387,11 @@ class Flip:
         the bot, or plain :class:`~esgbot.game.rules.Settings`, which is the same
         thing with nothing left out. Either way the flip keeps it as a request
         and resolves it at Start.
+
+        ``also_seated`` are players who asked to be put into flips like this
+        one. They are in the lobby from its first message, after the starter
+        and in the order given, as far as the player cap allows, and may leave
+        like anybody else.
         """
         self._token = token if token is not None else new_token()
         self._group_id = group_id
@@ -403,6 +409,11 @@ class Flip:
 
         self._phase = FlipPhase.LOBBY
         self._players: list[Player] = [starter]
+        for player in also_seated:
+            if len(self._players) >= self._request.max_players:
+                break
+            if all(seated.user_id != player.user_id for seated in self._players):
+                self._players.append(player)
         self._message_id = 0
         self._created_at = clock.now()
         self._created_monotonic = clock.monotonic()

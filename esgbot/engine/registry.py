@@ -34,6 +34,7 @@ briefly, and before the Telegram session closes.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from types import TracebackType
 from typing import Self
 
@@ -164,12 +165,15 @@ class FlipRegistry:
         group_id: int,
         starter: Player,
         settings: Settings | FlipRequest,
+        also_seated: Sequence[Player] = (),
         topic_id: int | None = None,
         token: str | None = None,
     ) -> Flip:
         """Open a lobby: post its message, write its row, and start its timer.
 
-        The starter joins as the first player.
+        The starter joins as the first player, and ``also_seated`` -- the
+        players who asked to be put into flips like this one -- after them, as
+        far as the player cap allows.
 
         ``settings`` is what the command asked for: a
         :class:`~esgbot.game.rules.FlipRequest` when it left ``Y`` or ``Z`` to
@@ -197,6 +201,7 @@ class FlipRegistry:
             topic_id=topic_id,
             settings=settings,
             starter=starter,
+            also_seated=also_seated,
             gateway=self._gateway,
             store=self._store,
             clock=self._clock,

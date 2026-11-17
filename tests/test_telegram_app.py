@@ -269,6 +269,7 @@ def test_the_command_menu_is_registered_before_polling_starts(start: _Starter) -
     assert [command.command for command in started.bot.commands] == [
         "flip",
         "again",
+        "autojoin",
         "leaderboard",
         "stats",
         "verify",
@@ -279,7 +280,7 @@ def test_the_command_menu_is_registered_before_polling_starts(start: _Starter) -
 def test_every_menu_entry_is_one_telegram_will_accept() -> None:
     names = [command.command for command in app.COMMANDS]
 
-    assert names == ["flip", "again", "leaderboard", "stats", "verify"]
+    assert names == ["flip", "again", "autojoin", "leaderboard", "stats", "verify"]
     assert len(names) == len(set(names))
     flip = next(command for command in app.COMMANDS if command.command == "flip")
     assert "/flip <wager> <private cards> [extra cards] [scoop multiplier]" in flip.description

@@ -1126,7 +1126,7 @@ def test_new_database_is_at_current_schema_version(tmp_path: Path) -> None:
     asyncio.run(scenario())
     connection = sync_connection(path)
     try:
-        assert schema.schema_version(connection) == SCHEMA_VERSION == 2
+        assert schema.schema_version(connection) == SCHEMA_VERSION == 3
         assert schema.apply_migrations(connection) == SCHEMA_VERSION  # idempotent
     finally:
         connection.close()
@@ -1342,7 +1342,7 @@ def test_a_version_one_file_is_stepped_up_to_version_two(tmp_path: Path) -> None
 
     connection = sync_connection(path)
     try:
-        assert schema.schema_version(connection) == 2
+        assert schema.schema_version(connection) == SCHEMA_VERSION
         assert connection.execute("SELECT COUNT(*) FROM group_last_flip").fetchone()[0] == 2
         assert (
             connection.execute(
@@ -1378,7 +1378,7 @@ def test_a_version_one_file_without_flips_gets_an_empty_last_flip_table(tmp_path
     v1_database(path).close()
     connection = schema.connect(path)
     try:
-        assert schema.apply_migrations(connection) == 2
+        assert schema.apply_migrations(connection) == SCHEMA_VERSION
         assert connection.execute("SELECT COUNT(*) FROM group_last_flip").fetchone()[0] == 0
     finally:
         connection.close()
@@ -1391,12 +1391,12 @@ def test_the_upgrade_is_idempotent_and_a_current_file_is_left_alone(tmp_path: Pa
     connection.close()
     connection = schema.connect(path)
     try:
-        assert schema.apply_migrations(connection) == 2
+        assert schema.apply_migrations(connection) == SCHEMA_VERSION
         # Someone changes the row after the upgrade; a second run must not rebuild it.
         connection.execute("UPDATE group_last_flip SET wager = 99")
         master = connection.execute("SELECT * FROM sqlite_master ORDER BY name").fetchall()
-        assert schema.apply_migrations(connection) == 2
-        assert schema.schema_version(connection) == 2
+        assert schema.apply_migrations(connection) == SCHEMA_VERSION
+        assert schema.schema_version(connection) == SCHEMA_VERSION
         assert connection.execute("SELECT wager FROM group_last_flip").fetchone()[0] == 99
         assert connection.execute("SELECT * FROM sqlite_master ORDER BY name").fetchall() == master
         assert connection.execute("SELECT COUNT(*) FROM flips").fetchone()[0] == 1
@@ -1408,8 +1408,8 @@ def test_a_fresh_file_and_an_upgraded_file_have_the_same_schema(tmp_path: Path) 
     fresh = schema.connect(tmp_path / "fresh.db")
     upgraded = v1_database(tmp_path / "old.db")
     try:
-        assert schema.apply_migrations(fresh) == 2
-        assert schema.apply_migrations(upgraded) == 2
+        assert schema.apply_migrations(fresh) == SCHEMA_VERSION
+        assert schema.apply_migrations(upgraded) == SCHEMA_VERSION
         query = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
         assert [tuple(r) for r in fresh.execute(query)] == [
             tuple(r) for r in upgraded.execute(query)

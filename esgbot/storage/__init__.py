@@ -24,6 +24,10 @@ The database answers four kinds of question, and nothing else knows any SQL:
   ``/again`` opens a new lobby with. One row per group, written by
   :meth:`Database.record_flip` in the same transaction as the flip that set it.
 
+* **Auto-join.** :meth:`Database.set_autojoin`, :meth:`Database.clear_autojoin`
+  and :meth:`Database.autojoin_limit` keep what a player asked for with
+  ``/autojoin``, and :meth:`Database.autojoiners` is who a new lobby seats.
+
 :meth:`Database.migrate_group_id` moves a group's rows when Telegram turns it
 into a supergroup, so stats and its last settings carry over.
 
@@ -43,6 +47,7 @@ from esgbot.storage.database import Database
 from esgbot.storage.errors import CorruptRecordError, SchemaTooNewError, StorageError
 from esgbot.storage.models import (
     ActiveFlip,
+    AutoJoiner,
     FinishedFlip,
     FlipPlayer,
     FlipState,
@@ -58,6 +63,7 @@ __all__ = [
     "DEFAULT_LEADERBOARD_LIMIT",
     "SCHEMA_VERSION",
     "ActiveFlip",
+    "AutoJoiner",
     "CorruptRecordError",
     "Database",
     "FinishedFlip",
