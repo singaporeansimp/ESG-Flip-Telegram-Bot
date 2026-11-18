@@ -30,8 +30,14 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat
-from aiogram.methods import EditMessageReplyMarkup, SetMyCommands
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramMigrateToChat,
+    TelegramNetworkError,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
+from aiogram.methods import EditMessageReplyMarkup, GetMe, SetMyCommands
 from aiogram.types import BotCommand
 from aiohttp import web
 
@@ -105,6 +111,9 @@ class _Bot(FakeTelegram):
         self.session = _Session()
         self.commands: list[BotCommand] = []
         self.command_failure: BaseException | None = None
+
+    async def me(self) -> None:
+        """Who the bot is; the real one is asked once and cached."""
 
     async def set_my_commands(self, commands: list[BotCommand]) -> bool:
         if self.command_failure is not None:
@@ -776,7 +785,9 @@ class _LocalTelegram:
             "chat": {"id": int(str(form.get("chat_id", GROUP))), "type": "group"},
             "text": text,
         }
-        return web.json_response({"ok": True, "result": sent if method == "sendMessage" else True})
+        me = {"id": 1, "is_bot": True, "first_name": "ESG", "username": "esg_bot"}
+        results = {"sendMessage": sent, "getMe": me}
+        return web.json_response({"ok": True, "result": results.get(method, True)})
 
 
 def test_the_real_poller_leaves_one_result_message_and_not_two(
@@ -968,3 +979,30 @@ def test_an_interrupted_bot_exits_cleanly(
 
     assert _main() == 0
     assert entry == []
+
+
+def test_startup_waits_out_a_telegram_that_is_not_answering_and_stops_on_a_refused_token() -> None:
+    class Flaky:
+        def __init__(self, failures: list[BaseException]) -> None:
+            self.failures = failures
+            self.asked = 0
+
+        async def me(self) -> None:
+            self.asked += 1
+            if self.failures:
+                raise self.failures.pop(0)
+
+    method = GetMe()
+    flaky = Flaky(
+        [
+            TelegramServerError(method=method, message="Bad Gateway"),
+            TelegramNetworkError(method, "timeout"),
+        ]
+    )
+    asyncio.run(app.reach_telegram(flaky, retry_seconds=0))  # type: ignore[arg-type]
+    assert flaky.asked == 3
+
+    refused = Flaky([TelegramUnauthorizedError(method=method, message="Unauthorized")])
+    with pytest.raises(TelegramUnauthorizedError):
+        asyncio.run(app.reach_telegram(refused, retry_seconds=0))  # type: ignore[arg-type]
+    assert refused.asked == 1

@@ -30,12 +30,13 @@ everything that might still have something to say.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Final
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramServerError
 from aiogram.types import BotCommand
 
 from esgbot.engine import FlipRegistry
@@ -46,7 +47,7 @@ from esgbot.telegram.handlers import build_router
 from esgbot.telegram.settings import BotSettings
 from esgbot.telegram.sweep import void_leftover_flips
 
-__all__ = ["ALLOWED_UPDATES", "COMMANDS", "register_commands", "run_bot"]
+__all__ = ["ALLOWED_UPDATES", "COMMANDS", "reach_telegram", "register_commands", "run_bot"]
 
 _logger = get_logger(__name__)
 
@@ -94,6 +95,30 @@ async def register_commands(bot: Bot) -> None:
         _logger.info("registered %d commands", len(COMMANDS))
 
 
+_REACH_RETRY_SECONDS: Final = 5.0
+"""How long to wait between tries when Telegram cannot be reached at start."""
+
+
+async def reach_telegram(bot: Bot, *, retry_seconds: float = _REACH_RETRY_SECONDS) -> None:
+    """Ask Telegram who this bot is, and keep asking while it cannot be reached.
+
+    The poller makes this one call itself before it fetches anything and does
+    not retry it, so a Telegram that is down for a moment as the bot starts
+    would end the process. The answer is cached on the bot, so asking first
+    means the poller's own call costs nothing. Only an unreachable Telegram or
+    a server error is waited out: anything else -- a refused token above all --
+    is a fault no wait will mend and ends the start as it always has.
+    """
+    while True:
+        try:
+            await bot.me()
+        except (TelegramNetworkError, TelegramServerError) as error:
+            _logger.warning("Telegram is not answering (%s); trying again", error)
+            await asyncio.sleep(retry_seconds)
+        else:
+            return
+
+
 async def run_bot(settings: BotSettings) -> None:
     """Run the bot until it is stopped, then close everything it opened.
 
@@ -120,6 +145,7 @@ async def run_bot(settings: BotSettings) -> None:
                 build_router(registry=registry, gateway=gateway, store=database)
             )
             await void_leftover_flips(store=database, gateway=gateway)
+            await reach_telegram(bot)
             await register_commands(bot)
             _logger.info("polling for updates")
             try:
