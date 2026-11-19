@@ -147,10 +147,15 @@ class MadeHand:
     own cards alone. ``hand`` is the evaluator's own record of the five cards it
     chose and what they are worth, so a pop-up names a hand exactly as the
     showdown will.
+
+    ``nuts`` is whether no hand anybody else could be holding beats it, as far
+    as the cards this player can see tell: see :func:`esgbot.engine.peek.read_hand`.
+    It is only ever set for a community board.
     """
 
     board: Board
     hand: BestHand
+    nuts: bool = False
 
 
 @dataclass(frozen=True, slots=True)

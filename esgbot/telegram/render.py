@@ -970,19 +970,36 @@ def render_void(view: VoidView) -> str:
 # --------------------------------------------------------------- press answers
 
 
+_NUTS_MARK: Final = " (NUTS)"
+"""What follows the name of a hand nobody else can beat. See :func:`_made_in_full`."""
+
+
 def _made_in_full(made: MadeHand) -> str:
-    """``Board 1: flush, jack high · A♠ K♠ Q♠ J♠ 9♠``: the hand named, and the five cards."""
-    return f"{_BOARD_NAMES[made.board]}: {made.hand.description} · {_cards(made.hand.cards)}"
+    """``Board 1: flush, jack high (NUTS) · A♠ K♠ Q♠ J♠ 9♠``: the hand named, and the five cards."""
+    nuts = _NUTS_MARK if made.nuts else ""
+    return f"{_BOARD_NAMES[made.board]}: {made.hand.description}{nuts} · {_cards(made.hand.cards)}"
 
 
 def _made_named(made: MadeHand) -> str:
-    """``Board 1: flush, jack high``: the hand named, without saying which cards."""
-    return f"{_BOARD_NAMES[made.board]}: {made.hand.description}"
+    """``Board 1: flush, jack high (NUTS)``: the hand named, without saying which cards."""
+    nuts = _NUTS_MARK if made.nuts else ""
+    return f"{_BOARD_NAMES[made.board]}: {made.hand.description}{nuts}"
 
 
 def _made_short(made: MadeHand) -> str:
-    """``B1: flush J``: as little as still names the hand. See :data:`_SHORT_HANDS`."""
-    return f"{_BOARD_MARKS[made.board]}: {_short_hand(made.hand.rank)}"
+    """``B1: flush J (NUTS)``: as little as still names the hand. See :data:`_SHORT_HANDS`."""
+    nuts = _NUTS_MARK if made.nuts else ""
+    return f"{_BOARD_MARKS[made.board]}: {_short_hand(made.hand.rank)}{nuts}"
+
+
+def _made_tersest(made: MadeHand) -> str:
+    """``B1: flush J NUTS``: the short form with the nuts' brackets taken off.
+
+    The last rung, for the one pop-up the third cannot hold: the widest hand a
+    flip can deal with the nuts on both community boards, two characters over.
+    """
+    nuts = " NUTS" if made.nuts else ""
+    return f"{_BOARD_MARKS[made.board]}: {_short_hand(made.hand.rank)}{nuts}"
 
 
 def _short_hand(rank: HandRank) -> str:
@@ -992,7 +1009,7 @@ def _short_hand(rank: HandRank) -> str:
     return _SHORT_HANDS[rank.category].format(*(held.label for held in rank.tiebreak))
 
 
-_MADE_FORMS: Final = (_made_in_full, _made_named, _made_short)
+_MADE_FORMS: Final = (_made_in_full, _made_named, _made_short, _made_tersest)
 """How a made hand may be written, roomiest first. See :func:`render_peek`."""
 
 
@@ -1013,11 +1030,14 @@ def render_peek(answer: PeekAnswer) -> str:
 
     1. the hand named, with the five cards it is made of;
     2. the hand named;
-    3. :data:`_BOARD_MARKS` and :data:`_SHORT_HANDS` -- ``B1: full house Q/7``.
+    3. :data:`_BOARD_MARKS` and :data:`_SHORT_HANDS` -- ``B1: full house Q/7``;
+    4. the same with ``NUTS`` for ``(NUTS)``, which only the widest hand with
+       the nuts on both boards ever needs.
 
-    The last of those fits every hand a flip can deal with room to spare, which
-    the tests prove by sweeping every legal shape of hand, so a line is never
-    dropped and the cards are never cut. :func:`_clip` is the backstop under all
+    A hand that is the nuts on a board says so in every rung, after its name.
+    The last rung fits every hand a flip can deal, which the tests prove by
+    sweeping every legal shape of hand, so a line is never dropped and the
+    cards are never cut. :func:`_clip` is the backstop under all
     of it and nothing reaches it.
     """
     cards = answer.cards

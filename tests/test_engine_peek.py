@@ -20,6 +20,7 @@ several at once do not queue behind each other.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import threading
 from collections.abc import Callable, Sequence
 from typing import Final
@@ -42,7 +43,7 @@ from esgbot.engine import (
     read_hand_in_thread,
 )
 from esgbot.engine import peek as peek_module
-from esgbot.game.cards import Card, parse_cards
+from esgbot.game.cards import FULL_DECK, Card, parse_cards
 from esgbot.game.deal import Deal, deal_cards
 from esgbot.game.evaluator import Category, best_hand, best_hand_for_board
 from esgbot.game.rules import Settings
@@ -495,3 +496,72 @@ def test_a_peek_by_somebody_who_is_not_playing_reads_nothing() -> None:
             await world.finish(flip)
 
     asyncio.run(scenario())
+
+
+# ------------------------------------------------------------------------- the nuts
+
+
+def _nuts(hand: str, *boards: str) -> list[bool]:
+    """Which boards of this reading are the nuts: the boards shown, then hand strength."""
+    return [made.nuts for made in read_hand(parse_cards(hand), [parse_cards(b) for b in boards])]
+
+
+_SPADES = "Q♠ J♠ 10♠ 2♦ 3♣"
+_FILLER = "2♥ 3♥ 4♥ 5♥"
+
+
+def test_a_hand_nobody_can_beat_on_the_cards_in_view_is_the_nuts() -> None:
+    # The royal flush itself, and nothing beats it.
+    assert _nuts(f"A♠ K♠ {_FILLER}", _SPADES) == [True, False]
+    # A♠ is in this hand and 9♠ is too, so the K♠ left cannot make a better straight flush.
+    assert _nuts(f"A♠ 9♠ 8♠ {_FILLER}", _SPADES) == [True, False]
+
+
+def test_a_hand_that_somebody_could_beat_is_not_the_nuts() -> None:
+    # A♠ K♠ are both unseen, so somebody may hold the royal flush.
+    assert _nuts(f"9♠ 8♠ {_FILLER}", _SPADES) == [False, False]
+
+
+def test_the_hand_strength_board_is_never_marked() -> None:
+    assert _nuts(f"A♠ K♠ {_FILLER}") == [False]
+
+
+def test_a_board_that_is_not_out_is_not_read() -> None:
+    assert len(_nuts(f"A♠ K♠ {_FILLER}")) == 1
+    assert len(_nuts(f"A♠ K♠ {_FILLER}", _SPADES)) == 2
+
+
+def test_the_other_board_hides_cards_from_the_nuts_only_once_it_is_out() -> None:
+    """Both boards come from one deck, so a card on Board 2 is nobody's hole card once seen.
+
+    On Board 1 a Q-high straight flush loses to the royal flush while the A♥ and
+    K♥ are both unseen; when the K♥ turns up on Board 2 the royal flush cannot
+    be held by anybody, and the hand is the nuts. Before Board 2 is out the K♥ is
+    still anybody's, which is what keeps this from telling a player anything.
+    """
+    hand = "9♥ 8♥ 2♦ 3♦ 4♦ 5♦"
+    board1 = "Q♥ J♥ 10♥ 2♠ 3♠"
+    board2 = "K♥ 7♣ 6♣ 4♣ 2♣"
+
+    assert _nuts(hand, board1) == [False, False]
+    assert _nuts(hand, board1, board2) == [True, False, False]
+
+
+def test_the_peek_a_flip_raises_marks_the_nuts_it_found() -> None:
+    deal = deal_cards(seed=bytes(range(32)), player_ids=_IDS, x=5, y=2)
+    for hand in deal.hands:
+        made = read_hand(hand.cards, deal.boards)
+        assert [one.nuts for one in made] == [
+            all(
+                best_hand_for_board(pair, deal.boards[index]).rank <= one.hand.rank
+                for pair in itertools.combinations(
+                    [
+                        c
+                        for c in FULL_DECK
+                        if c not in {*hand.cards, *deal.boards[0], *deal.boards[1]}
+                    ],
+                    2,
+                )
+            )
+            for index, one in enumerate(made[:2])
+        ] + [False]

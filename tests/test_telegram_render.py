@@ -1452,3 +1452,29 @@ def test_a_big_wager_gets_thousands_separators() -> None:
 def test_fractions_render_exactly() -> None:
     assert render._points(Fraction(3, 2)) == "3/2"
     assert render._points(Fraction(2)) == "2"
+
+
+def test_a_board_that_is_the_nuts_says_so_in_every_form_a_pop_up_can_take() -> None:
+    flush = _made(Board.BOARD1, "flush, ace high", "As Ks Qs 9s 2s")
+    nuts = MadeHand(board=flush.board, hand=flush.hand, nuts=True)
+
+    assert render._made_in_full(nuts).startswith("Board 1: flush, ace high (NUTS) · ")
+    assert render._made_named(nuts) == "Board 1: flush, ace high (NUTS)"
+    assert render._made_short(nuts) == "B1: flush A (NUTS)"
+    assert render._made_tersest(nuts) == "B1: flush A NUTS"
+    for form in (render._made_named, render._made_short, render._made_tersest):
+        assert "NUTS" not in form(flush)
+
+
+def test_the_widest_hand_with_the_nuts_on_both_boards_still_fits_the_pop_up() -> None:
+    reading = tuple(
+        MadeHand(board=made.board, hand=made.hand, nuts=made.board is not Board.HAND_STRENGTH)
+        for made in _big_reading(2)
+    )
+    for count, x, extra in _legal_shapes():
+        hole, held = _widest_hand(x, extra)
+        text = render.render_peek(PeekAnswer(seat=count - 1, hole=hole, extra=held, made=reading))
+        assert len(text) <= render.ALERT_LIMIT, f"{count} players, x={x}, extra={extra}"
+        assert not text.endswith("…")
+        assert len(text.splitlines()[1].split()) == x + extra
+        assert text.count("NUTS") == 2

@@ -13,6 +13,15 @@ cards nobody has been shown. :meth:`esgbot.engine.flip.Flip.peek` decides which
 boards those are and passes them in; this module reads what it is given, and the
 hand-strength board needs no board at all.
 
+**The nuts** are the best hand anybody else could hold on a board, given what this
+player can see: the boards the table has shown and their own cards. Every other
+card is unseen to them, so any two of those could be in another player's hand,
+and a hand is the nuts when none of those pairs makes a better one. It is worked
+out from what the player can see and nothing else, so it tells them nothing
+about the cards still to come. Only the community boards get it: another
+player's hand-strength board is out of as many cards as they hold, which is
+more than anyone can enumerate.
+
 **It runs in a worker thread.** The hand-strength search over a 21-card hand
 checks 20,349 five-card hands, which is tens of milliseconds, and each community
 board another 2,100; a Peek is answered while a flip's timers and every other
@@ -26,11 +35,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from itertools import chain, combinations
 from typing import Final
 
 from esgbot.engine.views import MadeHand
-from esgbot.game.cards import Card
-from esgbot.game.evaluator import best_hand, best_hand_for_board
+from esgbot.game.cards import FULL_DECK, Card
+from esgbot.game.evaluator import BestHand, best_hand, best_hand_for_board
 from esgbot.game.scoring import Board
 
 __all__ = ["HandReader", "read_hand", "read_hand_in_thread"]
@@ -63,13 +73,21 @@ def read_hand(cards: Sequence[Card], boards: Sequence[Sequence[Card]]) -> tuple[
     """
     if len(boards) > len(_COMMUNITY_BOARDS):
         raise ValueError(f"a flip has {len(_COMMUNITY_BOARDS)} community boards, got {len(boards)}")
-    made = [
-        MadeHand(board=board, hand=best_hand_for_board(cards, shown))
-        # The boards a table has shown are the first of its boards, in this order.
-        for board, shown in zip(_COMMUNITY_BOARDS, boards, strict=False)
-    ]
+    unseen = [card for card in FULL_DECK if card not in {*cards, *chain.from_iterable(boards)}]
+    made = []
+    # The boards a table has shown are the first of its boards, in this order.
+    for board, shown in zip(_COMMUNITY_BOARDS, boards, strict=False):
+        hand = best_hand_for_board(cards, shown)
+        made.append(MadeHand(board=board, hand=hand, nuts=_is_nuts(hand, shown, unseen)))
     made.append(MadeHand(board=Board.HAND_STRENGTH, hand=best_hand(cards)))
     return tuple(made)
+
+
+def _is_nuts(hand: BestHand, board: Sequence[Card], unseen: Sequence[Card]) -> bool:
+    """Whether no two of the unseen cards make a better hand on this board. A tie is the nuts."""
+    return all(
+        best_hand_for_board(pair, board).rank <= hand.rank for pair in combinations(unseen, 2)
+    )
 
 
 async def read_hand_in_thread(
