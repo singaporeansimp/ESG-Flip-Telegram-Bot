@@ -358,6 +358,25 @@ AUTOJOIN_OFF: Final = "Auto-join is off. You will only be in flips you join your
 
 AUTOJOIN_NOT_ON: Final = f"You have auto-join off in this group.\n\n{AUTOJOIN_USAGE}"
 
+AUTOPEEK_USAGE: Final = (
+    "<b>Count yourself as having peeked automatically</b>\n"
+    "<code>/autopeek on</code> — in every flip you play in this group, you are counted as having "
+    "peeked as soon as the extra cards are out\n"
+    "<code>/autopeek off</code> — stop\n"
+    "<code>/autopeek</code> — what you have set"
+)
+"""How to write ``/autopeek``, shown when what came after it cannot be read."""
+
+AUTOPEEK_ON: Final = (
+    "👀 <b>Auto-peek is on</b>\n"
+    "In this group you will be counted as having peeked as soon as the extra cards are out, "
+    "so the table does not wait for you. Press Peek to see your cards; nothing is shown to you "
+    "automatically.\n"
+    "<code>/autopeek off</code> stops it."
+)
+
+AUTOPEEK_OFF: Final = "Auto-peek is off. You are counted as having peeked when you press Peek."
+
 AUTOJOIN_TROUBLE: Final = (
     "I could not do that: the database is not available right now.\nTry again in a moment."
 )

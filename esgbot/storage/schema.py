@@ -1,6 +1,6 @@
 """The database file: how it is opened, and the tables inside it.
 
-Five tables:
+Six tables:
 
 ``flips``
     One row per finished flip, holding its settings, the seed and commitment, the
@@ -27,6 +27,10 @@ Five tables:
     kept as it was when they asked, because a lobby that seats them has no
     message of theirs to read it from. Rows keep the order they were first
     written in, which is the order they are seated in.
+
+``autopeek``
+    One row per player per group who has asked, with ``/autopeek``, to be counted
+    as having peeked in every flip there.
 
 Only finished flips reach ``flips`` and ``group_last_flip``, so cancelled and
 voided flips are absent from stats, and from ``/again``, by construction rather
@@ -72,7 +76,7 @@ __all__ = [
     "schema_version",
 ]
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 """The newest schema version this code understands."""
 
 BUSY_TIMEOUT_MS: Final = 5_000
@@ -189,7 +193,23 @@ _MIGRATION_3: Final[tuple[str, ...]] = (
     """,
 )
 
-_MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3)
+# Version 4 adds the ``/autopeek`` table. Nothing is backfilled: nobody has asked.
+_MIGRATION_4: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE autopeek (
+        group_id INTEGER NOT NULL,
+        user_id  INTEGER NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+    )
+    """,
+)
+
+_MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
+    _MIGRATION_1,
+    _MIGRATION_2,
+    _MIGRATION_3,
+    _MIGRATION_4,
+)
 
 _logger = get_logger(__name__)
 

@@ -26,6 +26,7 @@ together the way :mod:`esgbot.telegram.app` does.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -565,6 +566,27 @@ class FakeDatabase(FakeStore):
         if self.autojoin_error is not None:
             raise self.autojoin_error
         return queries.autojoiners(self.connection, group_id=group_id, wager=wager)
+
+    async def set_autopeek(self, *, group_id: int, user_id: int, on: bool) -> None:
+        """Keep what a player asked ``/autopeek`` for, with the real statement."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        queries.set_autopeek(self.connection, group_id=group_id, user_id=user_id, on=on)
+
+    async def autopeek_on(self, *, group_id: int, user_id: int) -> bool:
+        """What one player has set, by the real query."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        return queries.autopeek_on(self.connection, group_id=group_id, user_id=user_id)
+
+    async def autopeekers(self, *, group_id: int, user_ids: Collection[int]) -> frozenset[int]:
+        """Which of these players are set to auto-peek, by the real query."""
+        await asyncio.sleep(0)
+        if self.autojoin_error is not None:
+            raise self.autojoin_error
+        return queries.autopeekers(self.connection, group_id=group_id, user_ids=user_ids)
 
     # -------------------------------------------------------- the whole group
 

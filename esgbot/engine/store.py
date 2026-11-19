@@ -35,6 +35,7 @@ it rather than assuming either way.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Protocol, runtime_checkable
 
 from esgbot.storage import ActiveFlip, FinishedFlip, FlipState
@@ -75,4 +76,8 @@ class FlipStore(Protocol):
 
     async def remove_active_flip(self, token: str) -> bool:
         """Forget an in-progress flip. Returns ``False`` if it was already gone."""
+        ...
+
+    async def autopeekers(self, *, group_id: int, user_ids: Collection[int]) -> frozenset[int]:
+        """Which of these players asked to be counted as having peeked in this group."""
         ...

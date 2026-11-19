@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import sqlite3
 
 from esgbot.engine import (
     CommitmentView,
@@ -528,5 +529,60 @@ def test_a_slow_count_edit_is_not_followed_straight_away_by_another() -> None:
             gaps = [later - earlier for earlier, later in itertools.pairwise(stamps[1:])]
             assert all(gap >= timing.PEEK_EDIT_INTERVAL_SECONDS for gap in gaps)
             assert _peeked_counts(world) == [0, 1, 2]
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------- /autopeek
+
+
+def test_players_who_auto_peek_are_counted_the_moment_the_extra_cards_are_out() -> None:
+    async def scenario() -> None:
+        world = harness()
+        world.store.auto_peek = {11, 12, 13}
+        async with world.registry:
+            flip, started = await _begin(world, joiners=2)
+            await world.finish(flip)
+
+            (opening,) = _peeking_edits(world)
+            assert opening.at - started == WINDOW_OPENS
+            assert _peeked_counts(world) == [3]
+            first = WINDOW_OPENS + timing.PEEK_ALL_SECONDS
+            assert _showdown_offsets(world, started)[0] == first
+
+    asyncio.run(scenario())
+
+
+def test_the_window_waits_for_a_player_who_does_not_auto_peek() -> None:
+    async def scenario() -> None:
+        world = harness()
+        world.store.auto_peek = {11, 12, 99}  # 99 is not playing, and is not counted
+        async with world.registry:
+            flip, started = await _begin(world, joiners=2)
+            await _advance_to(world, started, 20.0)
+            assert _peeked_counts(world) == [2]
+            assert _showdown_edits(world) == []
+
+            await _peek(world, flip, 13)
+            await world.finish(flip)
+
+            assert _showdown_offsets(world, started)[0] == 20.0 + timing.PEEK_ALL_SECONDS
+
+    asyncio.run(scenario())
+
+
+def test_a_store_that_cannot_say_who_auto_peeks_costs_the_peek_and_not_the_flip() -> None:
+    async def scenario() -> None:
+        world = harness()
+        world.store.auto_peek = {11, 12, 13}
+        world.store.autopeek_error = sqlite3.OperationalError("disk I/O error")
+        async with world.registry:
+            flip, started = await _begin(world, joiners=2)
+            await world.finish(flip)
+
+            assert _peeked_counts(world) == [0]
+            first = WINDOW_OPENS + timing.PEEK_WINDOW_SECONDS
+            assert _showdown_offsets(world, started)[0] == first
+            assert flip.flip_number is not None
 
     asyncio.run(scenario())

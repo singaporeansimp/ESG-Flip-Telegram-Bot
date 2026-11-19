@@ -1126,7 +1126,7 @@ def test_new_database_is_at_current_schema_version(tmp_path: Path) -> None:
     asyncio.run(scenario())
     connection = sync_connection(path)
     try:
-        assert schema.schema_version(connection) == SCHEMA_VERSION == 3
+        assert schema.schema_version(connection) == SCHEMA_VERSION == 4
         assert schema.apply_migrations(connection) == SCHEMA_VERSION  # idempotent
     finally:
         connection.close()

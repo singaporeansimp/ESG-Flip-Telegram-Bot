@@ -67,6 +67,10 @@ COMMANDS: Final = (
         command="autojoin",
         description="Join flips here automatically: /autojoin <wager>, or /autojoin off",
     ),
+    BotCommand(
+        command="autopeek",
+        description="Count yourself as peeked automatically: /autopeek on, or /autopeek off",
+    ),
     BotCommand(command="leaderboard", description="Top players in this group by net winnings"),
     BotCommand(command="stats", description="Your stats, or /stats @name, or reply to someone"),
     BotCommand(command="verify", description="Check a finished flip: /verify <flip number>"),

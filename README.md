@@ -107,11 +107,12 @@ the same topic, and a second `/flip` there is still refused while it runs.
 | `/flip <wager> <private cards> [extra cards] [scoop multiplier]` | Opens a lobby, for example `/flip 50 5 2 3` or `/flip 50 5`. One flip per group at a time. |
 | `/again` | Opens a lobby with the settings of the last flip this group finished, written the same way. |
 | `/autojoin <wager>` | Puts you into every flip this group opens with a wager of that much or less. `/autojoin off` stops it; `/autojoin` alone shows what you have set. |
+| `/autopeek on` | Counts you as having peeked, in every flip you play in this group, as soon as the extra cards are out, so the table does not wait on you. It shows you nothing: press Peek to see your cards. `/autopeek off` stops it; `/autopeek` alone shows what you have set. |
 | `/leaderboard` | The group's top twenty by net winnings, with flips played, win rate and scoops. |
 | `/stats` | Your own figures. `/stats @name`, or `/stats` as a reply to somebody's message, shows theirs. |
 | `/verify <flip number>` | Re-runs a finished flip against its seed and reports whether everything still matches. |
 
-The bot registers these six with Telegram on every start, so they appear when someone types `/` in a
+The bot registers these seven with Telegram on every start, so they appear when someone types `/` in a
 chat with it. If Telegram refuses, the bot logs a warning and runs anyway; the commands still work typed out.
 
 The extra cards and the scoop multiplier are optional and positional, so a scoop multiplier needs
@@ -420,8 +421,8 @@ refuses a file a newer one has written — the journal says `database schema ver
 than this version of the bot supports`. Going back a version therefore means restoring the
 backup as well.
 
-This version brings the database to **schema 3**, which adds the table `/autojoin` keeps its
-settings in. Schema 2 added the two flags a flip records about
+This version brings the database to **schema 4**, which adds the table `/autopeek` keeps its
+settings in. Schema 3 added the table `/autojoin` keeps its settings in. Schema 2 added the two flags a flip records about
 which settings were left out of its command, and the per-group row `/again` reads. The upgrade
 runs in one transaction on the first start and fills that row in from each group's most recent
 flip, so `/again` works in a group whose history predates it; flips recorded before the upgrade

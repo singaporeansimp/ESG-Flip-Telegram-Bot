@@ -15,7 +15,7 @@ instead of the engine's default worker threads.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -509,6 +509,8 @@ class FakeStore:
     __slots__ = (
         "active",
         "add_error",
+        "auto_peek",
+        "autopeek_error",
         "next_number",
         "record_error",
         "recorded",
@@ -524,6 +526,14 @@ class FakeStore:
         self.add_error: Exception | None = None
         self.update_error: Exception | None = None
         self.remove_error: Exception | None = None
+        self.auto_peek: set[int] = set()
+        self.autopeek_error: Exception | None = None
+
+    async def autopeekers(self, *, group_id: int, user_ids: Collection[int]) -> frozenset[int]:
+        await asyncio.sleep(0)
+        if self.autopeek_error is not None:
+            raise self.autopeek_error
+        return frozenset(user_ids) & self.auto_peek
 
     async def record_flip(self, flip: FinishedFlip, *, token: str | None = None) -> int:
         await asyncio.sleep(0)

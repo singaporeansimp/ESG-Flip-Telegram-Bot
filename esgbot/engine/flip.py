@@ -1032,17 +1032,36 @@ class Flip:
             self._boards_shown = 1
         await self._clock.sleep(timing.BOARD_GAP_SECONDS)
         await self._show_table(TableStage.BOARD2)
+        auto_peekers = await self._auto_peekers()
         async with self._state_lock:
             self._boards_shown = 2
             # The extra cards go out now, which is the last card dealt and the
             # moment every hand is final, so both peek deadlines run from here.
             self._hands_final = True
             self._window_start = self._clock.monotonic()
+            for user_id in auto_peekers:
+                self._count_peek(user_id)
             self._peek_count_shown = len(self._peeked)
         await self._show_table(TableStage.PEEKING, peeked=self._peek_count_shown)
         async with self._state_lock:
             # The throttle on count edits runs from the edit that got through.
             self._last_count_edit = self._clock.monotonic()
+
+    async def _auto_peekers(self) -> frozenset[int]:
+        """The players who asked, with ``/autopeek``, to be counted as having peeked.
+
+        Asked just before the extra cards go out, so somebody who turned it on
+        while the lobby was open or the boards were coming is counted. The
+        players are fixed at Start. A store that cannot answer costs those
+        players their automatic peek and nobody the flip: they can press Peek.
+        """
+        try:
+            return await self._store.autopeekers(
+                group_id=self._group_id, user_ids=[seated.user_id for seated in self._players]
+            )
+        except (StorageError, sqlite3.Error) as error:
+            _logger.error("flip %s: could not read who auto-peeks: %s", self._token, error)
+            return frozenset()
 
     async def _peek_window(self) -> None:
         """Wait out the peek window, updating the peek count at most once every five seconds."""

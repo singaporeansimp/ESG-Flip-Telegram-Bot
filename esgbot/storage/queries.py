@@ -37,7 +37,7 @@ one particular number and not with whatever is in the column.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -65,6 +65,8 @@ __all__ = [
     "add_active_flip",
     "autojoin_limit",
     "autojoiners",
+    "autopeek_on",
+    "autopeekers",
     "clear_autojoin",
     "fetch_flip",
     "last_flip_request",
@@ -76,6 +78,7 @@ __all__ = [
     "record_flip",
     "remove_active_flip",
     "set_autojoin",
+    "set_autopeek",
     "transaction",
     "update_active_flip",
 ]
@@ -662,6 +665,42 @@ def autojoiners(
     return tuple(joiners)
 
 
+def set_autopeek(connection: sqlite3.Connection, *, group_id: int, user_id: int, on: bool) -> None:
+    """Count this player as having peeked in this group's flips, or stop doing so."""
+    parameters = {"group_id": group_id, "user_id": user_id}
+    with transaction(connection):
+        if on:
+            connection.execute(
+                "INSERT OR IGNORE INTO autopeek (group_id, user_id) VALUES (:group_id, :user_id)",
+                parameters,
+            )
+        else:
+            connection.execute(
+                "DELETE FROM autopeek WHERE group_id = :group_id AND user_id = :user_id",
+                parameters,
+            )
+
+
+def autopeek_on(connection: sqlite3.Connection, *, group_id: int, user_id: int) -> bool:
+    """Whether this player is counted as having peeked in this group's flips."""
+    row = connection.execute(
+        "SELECT 1 FROM autopeek WHERE group_id = :group_id AND user_id = :user_id",
+        {"group_id": group_id, "user_id": user_id},
+    ).fetchone()
+    return row is not None
+
+
+def autopeekers(
+    connection: sqlite3.Connection, *, group_id: int, user_ids: Collection[int]
+) -> frozenset[int]:
+    """Which of these players are counted as having peeked in this group's flips."""
+    found = set()
+    for user_id in user_ids:
+        if autopeek_on(connection, group_id=group_id, user_id=user_id):
+            found.add(user_id)
+    return frozenset(found)
+
+
 def migrate_group_id(
     connection: sqlite3.Connection, *, old_group_id: int, new_group_id: int
 ) -> GroupMigration:
@@ -669,7 +708,7 @@ def migrate_group_id(
 
     Telegram changes the id when a group becomes a supergroup. Every table
     moves in one transaction, so stats, any open flip, the settings ``/again``
-    repeats and everybody's ``/autojoin`` stay together. A player with an
+    repeats and everybody's ``/autojoin`` and ``/autopeek`` stay together. A player with an
     auto-join row under both ids keeps the new id's.
 
     The last-flip row is one per group, so the two ids could in principle each
@@ -705,6 +744,10 @@ def migrate_group_id(
             "UPDATE OR IGNORE autojoin SET group_id = :new WHERE group_id = :old", parameters
         )
         connection.execute("DELETE FROM autojoin WHERE group_id = :old", parameters)
+        connection.execute(
+            "UPDATE OR IGNORE autopeek SET group_id = :new WHERE group_id = :old", parameters
+        )
+        connection.execute("DELETE FROM autopeek WHERE group_id = :old", parameters)
     migration = GroupMigration(flips=flips, active_flips=actives)
     if migration.rows:
         _logger.info(

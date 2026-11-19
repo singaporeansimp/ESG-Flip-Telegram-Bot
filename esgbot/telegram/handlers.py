@@ -19,6 +19,9 @@ wager. Storage keeps what they asked for, and the one call that opens a lobby
 reads who that is for the wager in hand and seats them with the starter, so a
 flip from ``/again`` seats them exactly as one from ``/flip`` does.
 
+``/autopeek`` is a player asking to be counted as having peeked in their group's
+flips. Storage keeps it and the flip reads it once, as the extra cards go out.
+
 ``/leaderboard``, ``/stats`` and ``/verify`` read finished flips back out. They
 are all scoped to the group the command was sent in: a flip number or a player
 from another group is simply not there. ``/stats`` is about a ``@name`` given in
@@ -155,6 +158,14 @@ class CommandStore(MigrationStore, Protocol):
 
     async def autojoiners(self, *, group_id: int, wager: int) -> tuple[AutoJoiner, ...]:
         """Who auto-joins a flip at this wager here, first asker first."""
+        ...
+
+    async def set_autopeek(self, *, group_id: int, user_id: int, on: bool) -> None:
+        """Count this player as having peeked in this group's flips, or stop."""
+        ...
+
+    async def autopeek_on(self, *, group_id: int, user_id: int) -> bool:
+        """Whether this player is counted as having peeked here."""
         ...
 
 
@@ -423,6 +434,40 @@ def build_router(
             reply = render.render_autojoin_error(error)
         except (StorageError, sqlite3.Error) as error:
             _logger.error("could not read or set an auto-join in group %d: %s", group_id, error)
+            reply = render.AUTOJOIN_TROUBLE
+        await gateway.say(target, reply)
+
+    @router.message(Command("autopeek"))
+    async def auto_peek(message: Message, command: CommandObject) -> None:
+        """``/autopeek on``, ``/autopeek off``, or ``/autopeek`` to see what is set.
+
+        Counts the player as having peeked in every flip they play in this
+        group, from the moment the extra cards are out, so a table of players
+        who do not care to look is not made to wait out the thirty seconds. It
+        shows them nothing: Peek is still how they see their cards.
+        """
+        user = message.from_user
+        if user is None:
+            return
+        target = _target(message)
+        if not _in_group(message):
+            await gateway.say(target, render.NO_FLIP_IN_PRIVATE)
+            return
+        group_id = registry.group_id_for(target.group_id)
+        wanted = [word.lower() for word in (command.args or "").split()]
+        if len(wanted) > 1 or (wanted and wanted[0] not in ("on", "off")):
+            await gateway.say(target, render.AUTOPEEK_USAGE)
+            return
+        try:
+            if not wanted:
+                on = await store.autopeek_on(group_id=group_id, user_id=user.id)
+                reply = render.AUTOPEEK_ON if on else render.AUTOPEEK_OFF
+            else:
+                on = wanted[0] == "on"
+                await store.set_autopeek(group_id=group_id, user_id=user.id, on=on)
+                reply = render.AUTOPEEK_ON if on else render.AUTOPEEK_OFF
+        except (StorageError, sqlite3.Error) as error:
+            _logger.error("could not read or set an auto-peek in group %d: %s", group_id, error)
             reply = render.AUTOJOIN_TROUBLE
         await gateway.say(target, reply)
 

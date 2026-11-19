@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from os import PathLike
 from types import TracebackType
 from typing import Self, TypeVar
@@ -284,6 +284,26 @@ class Database:
         """Who auto-joins a flip at this wager in this group, first asker first."""
         return await self._run(
             lambda connection: queries.autojoiners(connection, group_id=group_id, wager=wager)
+        )
+
+    async def set_autopeek(self, *, group_id: int, user_id: int, on: bool) -> None:
+        """Count this player as having peeked in this group's flips, or stop."""
+        await self._run(
+            lambda connection: queries.set_autopeek(
+                connection, group_id=group_id, user_id=user_id, on=on
+            )
+        )
+
+    async def autopeek_on(self, *, group_id: int, user_id: int) -> bool:
+        """Whether this player is counted as having peeked in this group's flips."""
+        return await self._run(
+            lambda connection: queries.autopeek_on(connection, group_id=group_id, user_id=user_id)
+        )
+
+    async def autopeekers(self, *, group_id: int, user_ids: Collection[int]) -> frozenset[int]:
+        """Which of these players are counted as having peeked in this group's flips."""
+        return await self._run(
+            lambda connection: queries.autopeekers(connection, group_id=group_id, user_ids=user_ids)
         )
 
     async def migrate_group_id(self, *, old_group_id: int, new_group_id: int) -> GroupMigration:

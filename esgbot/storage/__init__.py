@@ -28,6 +28,11 @@ The database answers four kinds of question, and nothing else knows any SQL:
   and :meth:`Database.autojoin_limit` keep what a player asked for with
   ``/autojoin``, and :meth:`Database.autojoiners` is who a new lobby seats.
 
+* **Auto-peek.** :meth:`Database.set_autopeek` and :meth:`Database.autopeek_on`
+  keep what a player asked for with ``/autopeek``, and
+  :meth:`Database.autopeekers` is which of a flip's players a table counts as
+  having peeked.
+
 :meth:`Database.migrate_group_id` moves a group's rows when Telegram turns it
 into a supergroup, so stats and its last settings carry over.
 
