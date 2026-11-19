@@ -32,6 +32,12 @@ hangs under.
 worker thread, since re-running the evaluator is the one piece of real work a
 command does.
 
+The result of a recorded flip has an Again button, which is ``/again`` for that
+flip: it opens a lobby with that flip's own settings, written the way its command
+was, and whoever pressed is the starter. Its callback data holds the flip number
+instead of a token, so it is read from storage and works long after the registry
+has forgotten the flip, but only in the group the flip was played in.
+
 A press carries the flip's token in its callback data. The token is looked up in
 the registry and the press handed to the flip, which answers it and then shows
 whatever changed. A token the registry does not know belongs to a flip from
@@ -590,6 +596,36 @@ def build_router(
             return
         await group_moved(message.chat.id, new_group_id)
 
+    async def again_pressed(query: CallbackQuery, flip_text: str) -> None:
+        """Again on a result: that flip's settings, in a new lobby, for whoever pressed.
+
+        The flip is looked up in the group the button is in, so a button copied
+        from another group's result finds nothing and is answered as expired.
+        """
+        message = query.message
+        number = _flip_number(flip_text)
+        if not isinstance(message, Message) or not _in_group(message) or number is None:
+            await gateway.answer_press(query.id, Notice.EXPIRED)
+            return
+        target = _target(message)
+        try:
+            stored = await store.fetch_flip(group_id=target.group_id, flip_number=number)
+        except CorruptRecordError as damaged:
+            _logger.warning(
+                "flip %d in group %d cannot be read back: %s", number, target.group_id, damaged
+            )
+            await gateway.answer_press(query.id, Notice.TROUBLE)
+            return
+        except (StorageError, sqlite3.Error) as error:
+            _logger.error("could not read flip %d in group %d: %s", number, target.group_id, error)
+            await gateway.answer_press(query.id, Notice.TROUBLE)
+            return
+        if stored is None:
+            await gateway.answer_press(query.id, Notice.EXPIRED)
+            return
+        await gateway.answer_press(query.id, Notice.AGAIN)
+        await open_lobby(target, query.from_user, stored.flip.request)
+
     @router.callback_query()
     async def press_button(query: CallbackQuery) -> None:
         """A button on a lobby or a table. The token says which flip it belongs to.
@@ -598,6 +634,9 @@ def build_router(
         unanswered press leaves a spinner going on somebody's phone.
         """
         pressed = parse(query.data)
+        if pressed is not None and pressed.press is Press.AGAIN:
+            await again_pressed(query, pressed.token)
+            return
         flip = None if pressed is None else registry.flip_for_token(pressed.token)
         if pressed is None or flip is None:
             await gateway.answer_press(query.id, Notice.EXPIRED)

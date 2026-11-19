@@ -105,7 +105,7 @@ the same topic, and a second `/flip` there is still refused while it runs.
 | Command | Does |
 | --- | --- |
 | `/flip <wager> <private cards> [extra cards] [scoop multiplier]` | Opens a lobby, for example `/flip 50 5 2 3` or `/flip 50 5`. One flip per group at a time. |
-| `/again` | Opens a lobby with the settings of the last flip this group finished, written the same way. |
+| `/again` | Opens a lobby with the settings of the last flip this group finished, written the same way. The result message of a recorded flip has a 🔁 Again button that does the same for that flip's own settings. |
 | `/autojoin <wager>` | Puts you into every flip this group opens with a wager of that much or less. `/autojoin off` stops it; `/autojoin` alone shows what you have set. |
 | `/autopeek on` | Counts you as having peeked, in every flip you play in this group, as soon as the extra cards are out, so the table does not wait on you. It shows you nothing: press Peek to see your cards. `/autopeek off` stops it; `/autopeek` alone shows what you have set. |
 | `/leaderboard` | The group's top twenty by net winnings, with flips played, win rate and scoops. |

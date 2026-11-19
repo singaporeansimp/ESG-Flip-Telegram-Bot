@@ -235,6 +235,8 @@ _NOTICES: Final[dict[Notice, str]] = {
     Notice.NEED_MORE_PLAYERS: f"A flip needs at least {MIN_PLAYERS} players.",
     Notice.ALREADY_STARTED: "The round has already started.",
     Notice.NOT_A_PLAYER: "You are not in this flip, so there are no cards to show you.",
+    Notice.AGAIN: "Opening another flip with the same settings.",
+    Notice.TROUBLE: "The database is not available right now. Try again in a moment.",
     Notice.EXPIRED: "This flip has expired, so its buttons do nothing now.",
 }
 

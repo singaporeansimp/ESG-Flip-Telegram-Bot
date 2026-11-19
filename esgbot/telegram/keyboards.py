@@ -8,8 +8,14 @@ this process, be answered as expired. That is 13 characters for an
 :data:`CALLBACK_DATA_LIMIT` of 64 bytes; :func:`pack` refuses anything longer
 rather than letting Telegram silently drop a button.
 
+A result's Again button is the exception: what it carries is the flip's public
+number, not a token, because the flip is over and the registry has forgotten it.
+The handler reads the settings back from storage by that number, in the group the
+press came from.
+
 :func:`markup_for` is the one rule about which view carries which buttons: an
-open lobby has four, a live table has Peek, and everything final has none.
+open lobby has four, a live table has Peek, a recorded result has Again, and
+everything else final has none.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ from typing import Final
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from esgbot.engine.views import FlipView, LobbyStatus, LobbyView, TableView
+from esgbot.engine.views import FlipView, LobbyStatus, LobbyView, ResultView, TableView
 
 __all__ = [
     "CALLBACK_DATA_LIMIT",
@@ -31,6 +37,7 @@ __all__ = [
     "markup_for",
     "pack",
     "parse",
+    "result_markup",
     "table_markup",
 ]
 
@@ -49,6 +56,7 @@ class Press(StrEnum):
     START = "s"
     CANCEL = "c"
     PEEK = "p"
+    AGAIN = "a"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +128,19 @@ def table_markup(token: str) -> InlineKeyboardMarkup:
     )
 
 
+def result_markup(flip_number: int) -> InlineKeyboardMarkup:
+    """The one button on a recorded result: play that flip's settings again."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔁 Again", callback_data=pack(Press.AGAIN, str(flip_number))
+                )
+            ]
+        ]
+    )
+
+
 def markup_for(view: FlipView) -> InlineKeyboardMarkup | None:
     """The buttons this view carries, or ``None`` for a message that is final.
 
@@ -131,5 +152,7 @@ def markup_for(view: FlipView) -> InlineKeyboardMarkup | None:
             return lobby_markup(view.token)
         case TableView(voided=False):
             return table_markup(view.token)
+        case ResultView(flip_number=int() as flip_number):
+            return result_markup(flip_number)
         case _:
             return None

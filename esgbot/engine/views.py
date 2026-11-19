@@ -133,6 +133,12 @@ class Notice(StrEnum):
     NOT_A_PLAYER = "not_a_player"
     """Peek pressed by somebody who is not in this flip. They see no cards."""
 
+    AGAIN = "again"
+    """Again pressed on a result: a new lobby with that flip's settings is opening."""
+
+    TROUBLE = "trouble"
+    """A press that needed the database, which could not answer."""
+
     EXPIRED = "expired"
     """A press on a flip that is over, or on a button whose state has moved on."""
 

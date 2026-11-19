@@ -1623,3 +1623,145 @@ def test_flip_arriving_under_a_retired_id_opens_in_the_group_that_id_belonged_to
         await world.close()
 
     asyncio.run(scenario())
+
+
+# ------------------------------------------------------------ the Again button
+
+
+async def _press_again(
+    world: BotHarness, data: str, *, user_id: int = _STRANGER, chat_id: int = GROUP
+) -> str:
+    """Press an Again button as this user, and return the id the press was given."""
+    press_id = world.press_id()
+    await world.feed(
+        callback_query=button_press(
+            data, user_id=user_id, press_id=press_id, name="Lou", chat_id=chat_id
+        )
+    )
+    return press_id
+
+
+def _answer_to(world: BotHarness, press_id: str) -> str:
+    (answered,) = [call for call in world.client.answers if call.press_id == press_id]
+    return answered.text
+
+
+def test_a_recorded_result_carries_an_again_button_for_its_own_flip_number() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+
+        result = world.client.sends[-1]
+        assert result.buttons == ("🔁 Again",)
+        (number,) = world.store.connection.execute("SELECT flip_number FROM flips").fetchone()
+        assert result.callback_data == (pack(Press.AGAIN, str(number)),)
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_pressing_again_opens_a_lobby_with_that_flips_settings_and_the_presser_in_it() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2")  # the scoop multiplier left out
+        data = world.client.sends[-1].callback_data[0]
+        sends_before = len(world.client.sends)
+
+        press_id = await _press_again(world, data)
+
+        assert _answer_to(world, press_id) == render.render_notice(Notice.AGAIN)
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.request.wager == 50
+        assert flip.request.z_defaulted
+        assert flip.starter.user_id == _STRANGER
+        assert [seated.user_id for seated in flip.players] == [_STRANGER]
+        assert len(world.client.sends) == sends_before + 1
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_on_an_old_result_repeats_that_flip_and_not_the_latest_one() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        old = world.client.sends[-1].callback_data[0]
+        await _record(world, "/flip 70 5 2 3")
+
+        await _press_again(world, old)
+
+        flip = world.registry.flip_for_group(GROUP)
+        assert flip is not None
+        assert flip.request.wager == 50
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_while_a_flip_is_open_says_so_and_opens_nothing_more() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        data = world.client.sends[-1].callback_data[0]
+        await _press_again(world, data)
+        first = world.registry.flip_for_group(GROUP)
+        sends_before = len(world.client.sends)
+
+        await _press_again(world, data, user_id=_JOINER)
+
+        assert world.registry.flip_for_group(GROUP) is first
+        assert "already open" in world.client.sends[-1].text
+        assert len(world.client.sends) == sends_before + 1
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("data", ["a:9999", "a:0", "a:x", "a:-3"])
+def test_again_for_a_flip_this_group_never_played_is_answered_as_expired(data: str) -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        sends_before = len(world.client.sends)
+
+        press_id = await _press_again(world, data)
+
+        assert _answer_to(world, press_id) == render.render_notice(Notice.EXPIRED)
+        assert world.registry.flip_for_group(GROUP) is None
+        assert len(world.client.sends) == sends_before
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_button_copied_from_another_groups_result_finds_nothing() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        elsewhere = GROUP - 1
+        await _record(world, "/flip 50 5 2 3", group_id=elsewhere)
+        data = world.client.sends[-1].callback_data[0]
+
+        press_id = await _press_again(world, data)
+
+        assert _answer_to(world, press_id) == render.render_notice(Notice.EXPIRED)
+        assert world.registry.flip_for_group(GROUP) is None
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_again_with_a_failing_database_answers_the_press_and_opens_nothing() -> None:
+    async def scenario() -> None:
+        world = bot_harness()
+        await _record(world, "/flip 50 5 2 3")
+        data = world.client.sends[-1].callback_data[0]
+        world.store.fetch_error = sqlite3.OperationalError("disk I/O error")
+
+        press_id = await _press_again(world, data)
+
+        assert _answer_to(world, press_id) == render.render_notice(Notice.TROUBLE)
+        assert world.registry.flip_for_group(GROUP) is None
+        await world.close()
+
+    asyncio.run(scenario())
